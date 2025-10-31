@@ -1,0 +1,92 @@
+version: 1
+kind: dashboard
+slug: revenue-dashboard
+title: Revenue Dashboard
+owner: admin@company.com
+view_type: grid
+
+queries:
+  - id: monthly_revenue
+    warehouse: bigquery
+    sql: |
+      SELECT
+        DATE_TRUNC(order_date, MONTH) as month,
+        SUM(amount) as revenue,
+        COUNT(DISTINCT order_id) as order_count
+      FROM `project.dataset.orders`
+      WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH)
+      GROUP BY month
+      ORDER BY month DESC
+
+  - id: top_products
+    warehouse: bigquery
+    sql: |
+      SELECT
+        product_name,
+        SUM(amount) as revenue
+      FROM `project.dataset.orders`
+      WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH)
+      GROUP BY product_name
+      ORDER BY revenue DESC
+      LIMIT 10
+
+layout:
+  - id: total-revenue-kpi
+    type: kpi
+    chart: null
+    query_ref: monthly_revenue
+    title: Total Revenue (Last 12 Months)
+    config:
+      aggregation: sum
+      value_field: revenue
+      format: currency
+    style:
+      color: blue
+      size: medium
+    position:
+      row: 0
+      col: 0
+      width: 4
+      height: 2
+
+  - id: revenue-trend
+    type: chart
+    chart: line
+    query_ref: monthly_revenue
+    title: Revenue Trend
+    config:
+      x_axis: month
+      y_axis: revenue
+      series:
+        - name: Revenue
+          field: revenue
+          color: blue
+    style:
+      color: blue
+      size: large
+    position:
+      row: 0
+      col: 4
+      width: 8
+      height: 4
+
+  - id: top-products-chart
+    type: chart
+    chart: bar
+    query_ref: top_products
+    title: Top Products (Last Month)
+    config:
+      x_axis: product_name
+      y_axis: revenue
+      series:
+        - name: Revenue
+          field: revenue
+          color: green
+    style:
+      color: green
+      size: medium
+    position:
+      row: 4
+      col: 0
+      width: 12
+      height: 4

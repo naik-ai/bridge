@@ -1,0 +1,1000 @@
+openapi: 3.1.0
+info:
+  title: Peter Dashboard API
+  description: |
+    Backend API for Peter dashboard platform.
+    Handles dashboard management, BigQuery query execution, authentication, and lineage tracking.
+  version: 0.1.0
+  contact:
+    name: Peter Team
+    email: team@peter.com
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+  - url: https://api-staging.peter.com
+    description: Staging environment
+  - url: https://api.peter.com
+    description: Production environment
+
+tags:
+  - name: health
+    description: Health check endpoints
+  - name: auth
+    description: Authentication and authorization
+  - name: dashboards
+    description: Dashboard management
+  - name: sql
+    description: SQL execution and verification
+  - name: data
+    description: Data serving
+  - name: cache
+    description: Cache management
+  - name: lineage
+    description: Lineage tracking
+  - name: analytics
+    description: Analytics and cost tracking
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: peter_session
+
+  schemas:
+    # Common types
+    UUID:
+      type: string
+      format: uuid
+      example: "550e8400-e29b-41d4-a716-446655440000"
+
+    DateTime:
+      type: string
+      format: date-time
+      example: "2025-10-30T10:15:30Z"
+
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Invalid dashboard YAML"
+        details:
+          type: object
+          additionalProperties: true
+        trace_id:
+          type: string
+          example: "abc123"
+        remediation:
+          type: string
+          example: "Check YAML syntax and try again"
+
+    # Auth models
+    UserInfo:
+      type: object
+      required:
+        - id
+        - email
+      properties:
+        id:
+          $ref: "#/components/schemas/UUID"
+        email:
+          type: string
+          format: email
+          example: "user@example.com"
+        name:
+          type: string
+          nullable: true
+          example: "John Doe"
+        created_at:
+          $ref: "#/components/schemas/DateTime"
+        last_login:
+          $ref: "#/components/schemas/DateTime"
+          nullable: true
+
+    # Dashboard models
+    ViewType:
+      type: string
+      enum: [analytical, operational, strategic]
+      example: "analytical"
+
+    DashboardMetadata:
+      type: object
+      required:
+        - id
+        - slug
+        - name
+        - owner_id
+        - version
+        - view_type
+        - created_at
+        - updated_at
+      properties:
+        id:
+          $ref: "#/components/schemas/UUID"
+        slug:
+          type: string
+          pattern: "^[a-z0-9-]+$"
+          example: "revenue-dashboard"
+        name:
+          type: string
+          example: "Revenue Dashboard"
+        description:
+          type: string
+          nullable: true
+          example: "Monthly revenue trends by region"
+        owner_id:
+          $ref: "#/components/schemas/UUID"
+        owner_email:
+          type: string
+          format: email
+          example: "user@example.com"
+        storage_path:
+          type: string
+          example: "dashboards/revenue-dashboard/v1.yaml"
+        version:
+          type: integer
+          minimum: 1
+          example: 1
+        view_type:
+          $ref: "#/components/schemas/ViewType"
+        tags:
+          type: array
+          items:
+            type: string
+          example: ["finance", "kpi"]
+        created_at:
+          $ref: "#/components/schemas/DateTime"
+        updated_at:
+          $ref: "#/components/schemas/DateTime"
+        last_accessed:
+          $ref: "#/components/schemas/DateTime"
+          nullable: true
+        access_count:
+          type: integer
+          example: 42
+
+    DashboardYAML:
+      type: string
+      description: "Raw YAML content of dashboard definition"
+      example: |
+        version: 0
+        kind: dashboard
+        slug: revenue-dashboard
+        title: "Revenue Dashboard"
+        layout:
+          - id: rev_kpi
+            type: kpi
+            query_ref: q_revenue
+        queries:
+          - id: q_revenue
+            sql: "SELECT SUM(revenue) FROM mart.revenue_daily"
+
+    DashboardCreate:
+      type: object
+      required:
+        - yaml_content
+      properties:
+        yaml_content:
+          $ref: "#/components/schemas/DashboardYAML"
+        commit_message:
+          type: string
+          example: "Initial dashboard creation"
+
+    DashboardUpdate:
+      type: object
+      required:
+        - yaml_content
+      properties:
+        yaml_content:
+          $ref: "#/components/schemas/DashboardYAML"
+        commit_message:
+          type: string
+          example: "Updated chart colors"
+
+    DashboardListResponse:
+      type: object
+      required:
+        - dashboards
+        - total
+      properties:
+        dashboards:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardMetadata"
+        total:
+          type: integer
+          example: 10
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 20
+
+    # Validation & Compilation
+    ValidationResult:
+      type: object
+      required:
+        - valid
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              line:
+                type: integer
+              column:
+                type: integer
+              message:
+                type: string
+              severity:
+                type: string
+                enum: [error, warning]
+
+    ExecutionPlan:
+      type: object
+      required:
+        - queries
+        - lineage_seeds
+      properties:
+        queries:
+          type: array
+          items:
+            type: object
+            properties:
+              query_id:
+                type: string
+              sql:
+                type: string
+              depends_on:
+                type: array
+                items:
+                  type: string
+        lineage_seeds:
+          type: array
+          items:
+            type: object
+            properties:
+              query_id:
+                type: string
+              tables:
+                type: array
+                items:
+                  type: string
+
+    # SQL Execution
+    SQLRunRequest:
+      type: object
+      required:
+        - sql
+      properties:
+        sql:
+          type: string
+          example: "SELECT * FROM mart.revenue_daily LIMIT 100"
+        parameters:
+          type: object
+          additionalProperties: true
+        max_bytes_billed:
+          type: integer
+          example: 100000000
+
+    VerificationPayload:
+      type: object
+      required:
+        - schema
+        - row_count
+        - bytes_scanned
+        - duration_ms
+      properties:
+        schema:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              type:
+                type: string
+        row_count:
+          type: integer
+          example: 1500
+        bytes_scanned:
+          type: integer
+          example: 2500000
+        duration_ms:
+          type: integer
+          example: 1250
+        sample_rows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          maxItems: 100
+        job_id:
+          type: string
+        cache_hit:
+          type: boolean
+
+    # Data Serving
+    ChartData:
+      type: object
+      required:
+        - chart_id
+        - data
+        - as_of
+      properties:
+        chart_id:
+          type: string
+          example: "rev_trend"
+        data:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        as_of:
+          $ref: "#/components/schemas/DateTime"
+        source:
+          type: string
+          example: "revenue_daily_mv (p2025-10-30)"
+
+    DashboardData:
+      type: object
+      required:
+        - charts
+        - as_of
+      properties:
+        charts:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ChartData"
+        as_of:
+          $ref: "#/components/schemas/DateTime"
+        cache_hit:
+          type: boolean
+
+    FreshnessInfo:
+      type: object
+      required:
+        - chart_id
+        - as_of
+        - age_seconds
+      properties:
+        chart_id:
+          type: string
+        as_of:
+          $ref: "#/components/schemas/DateTime"
+        age_seconds:
+          type: integer
+        status:
+          type: string
+          enum: [fresh, stale, unknown]
+
+    # Precompute
+    PrecomputeRequest:
+      type: object
+      properties:
+        force:
+          type: boolean
+          default: false
+
+    PrecomputeResponse:
+      type: object
+      required:
+        - status
+        - queries_executed
+        - total_duration_ms
+      properties:
+        status:
+          type: string
+          enum: [success, partial, failed]
+        queries_executed:
+          type: integer
+        total_duration_ms:
+          type: integer
+        bytes_scanned:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+
+    # Lineage
+    NodeType:
+      type: string
+      enum: [dashboard, chart, query, table]
+
+    EdgeType:
+      type: string
+      enum: [contains, executes, reads_from]
+
+    LineageNode:
+      type: object
+      required:
+        - id
+        - node_type
+        - node_id
+      properties:
+        id:
+          $ref: "#/components/schemas/UUID"
+        node_type:
+          $ref: "#/components/schemas/NodeType"
+        node_id:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    LineageEdge:
+      type: object
+      required:
+        - source_node_id
+        - target_node_id
+        - edge_type
+      properties:
+        source_node_id:
+          $ref: "#/components/schemas/UUID"
+        target_node_id:
+          $ref: "#/components/schemas/UUID"
+        edge_type:
+          $ref: "#/components/schemas/EdgeType"
+
+    LineageGraph:
+      type: object
+      required:
+        - nodes
+        - edges
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineageNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineageEdge"
+
+    # Analytics
+    CostAnalytics:
+      type: object
+      required:
+        - total_bytes_scanned
+        - estimated_cost_usd
+        - query_count
+      properties:
+        total_bytes_scanned:
+          type: integer
+        estimated_cost_usd:
+          type: number
+          format: float
+        query_count:
+          type: integer
+        breakdown:
+          type: array
+          items:
+            type: object
+            properties:
+              dashboard_slug:
+                type: string
+              bytes_scanned:
+                type: integer
+              cost_usd:
+                type: number
+              query_count:
+                type: integer
+
+    # Health
+    HealthStatus:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        components:
+          type: object
+          properties:
+            database:
+              type: string
+              enum: [healthy, unhealthy]
+            bigquery:
+              type: string
+              enum: [healthy, unhealthy]
+            cache:
+              type: string
+              enum: [healthy, unhealthy]
+            storage:
+              type: string
+              enum: [healthy, unhealthy]
+        version:
+          type: string
+          example: "0.1.0"
+
+paths:
+  # Health endpoints
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      operationId: getReadiness
+      responses:
+        "200":
+          description: Service is ready
+        "503":
+          description: Service not ready
+
+  # Auth endpoints
+  /api/v1/auth/login:
+    get:
+      tags: [auth]
+      summary: Initiate OAuth login
+      operationId: initiateLogin
+      responses:
+        "302":
+          description: Redirect to Google OAuth
+        "500":
+          description: OAuth configuration error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/auth/callback:
+    get:
+      tags: [auth]
+      summary: OAuth callback
+      operationId: handleCallback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Redirect to app with session cookie
+        "401":
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Logout
+      operationId: logout
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Logged out successfully
+        "401":
+          description: Not authenticated
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Get current user
+      operationId: getCurrentUser
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: User information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfo"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # Dashboard endpoints
+  /api/v1/dashboards:
+    get:
+      tags: [dashboards]
+      summary: List dashboards
+      operationId: listDashboards
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: tags
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+        - name: owner_id
+          in: query
+          schema:
+            $ref: "#/components/schemas/UUID"
+      responses:
+        "200":
+          description: List of dashboards
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardListResponse"
+    post:
+      tags: [dashboards]
+      summary: Create dashboard
+      operationId: createDashboard
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DashboardCreate"
+      responses:
+        "201":
+          description: Dashboard created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardMetadata"
+        "400":
+          description: Invalid YAML
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/dashboards/validate:
+    post:
+      tags: [dashboards]
+      summary: Validate dashboard YAML
+      operationId: validateDashboard
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              $ref: "#/components/schemas/DashboardYAML"
+      responses:
+        "200":
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationResult"
+
+  /api/v1/dashboards/compile:
+    post:
+      tags: [dashboards]
+      summary: Compile dashboard to execution plan
+      operationId: compileDashboard
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              $ref: "#/components/schemas/DashboardYAML"
+      responses:
+        "200":
+          description: Execution plan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionPlan"
+
+  /api/v1/dashboards/{slug}:
+    get:
+      tags: [dashboards]
+      summary: Get dashboard
+      operationId: getDashboard
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Dashboard details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardMetadata"
+        "404":
+          description: Dashboard not found
+    put:
+      tags: [dashboards]
+      summary: Update dashboard
+      operationId: updateDashboard
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DashboardUpdate"
+      responses:
+        "200":
+          description: Dashboard updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardMetadata"
+    delete:
+      tags: [dashboards]
+      summary: Delete dashboard
+      operationId: deleteDashboard
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Dashboard deleted
+
+  # SQL endpoints
+  /api/v1/sql/run:
+    post:
+      tags: [sql]
+      summary: Execute SQL for verification
+      operationId: runSQL
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SQLRunRequest"
+      responses:
+        "200":
+          description: Query results with metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationPayload"
+        "400":
+          description: Invalid SQL or exceeded byte limit
+
+  /api/v1/sql/validate:
+    post:
+      tags: [sql]
+      summary: Validate SQL syntax
+      operationId: validateSQL
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: SQL is valid
+        "400":
+          description: SQL syntax error
+
+  # Data serving endpoints
+  /api/v1/dashboards/{slug}/data:
+    get:
+      tags: [data]
+      summary: Get dashboard data
+      operationId: getDashboardData
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: force_refresh
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Dashboard data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardData"
+
+  /api/v1/dashboards/{slug}/freshness:
+    get:
+      tags: [data]
+      summary: Get data freshness
+      operationId: getDataFreshness
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Freshness information
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FreshnessInfo"
+
+  # Precompute endpoints
+  /api/v1/dashboards/{slug}/precompute:
+    post:
+      tags: [cache]
+      summary: Precompute dashboard data
+      operationId: precomputeDashboard
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrecomputeRequest"
+      responses:
+        "200":
+          description: Precompute results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrecomputeResponse"
+
+  /api/v1/cache:
+    delete:
+      tags: [cache]
+      summary: Invalidate cache
+      operationId: invalidateCache
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: slug
+          in: query
+          schema:
+            type: string
+        - name: pattern
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Cache invalidated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys_deleted:
+                    type: integer
+
+  # Lineage endpoints
+  /api/v1/dashboards/{slug}/lineage:
+    get:
+      tags: [lineage]
+      summary: Get dashboard lineage
+      operationId: getDashboardLineage
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Lineage graph
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineageGraph"
+
+  # Analytics endpoints
+  /api/v1/analytics/costs:
+    get:
+      tags: [analytics]
+      summary: Get cost analytics
+      operationId: getCostAnalytics
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: dashboard_slug
+          in: query
+          schema:
+            type: string
+        - name: group_by
+          in: query
+          schema:
+            type: string
+            enum: [dashboard, user, date]
+      responses:
+        "200":
+          description: Cost analytics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CostAnalytics"

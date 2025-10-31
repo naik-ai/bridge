@@ -1,0 +1,56 @@
+version: 1
+kind: dashboard
+slug: ops-kpis
+title: Operations KPIs
+owner: admin@company.com
+view_type: grid
+
+queries:
+  - id: daily_orders
+    warehouse: bigquery
+    sql: |
+      SELECT
+        order_date,
+        COUNT(*) as order_count,
+        AVG(amount) as avg_order_value
+      FROM `project.dataset.orders`
+      WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+      GROUP BY order_date
+      ORDER BY order_date DESC
+
+layout:
+  - id: order-count-kpi
+    type: kpi
+    chart: null
+    query_ref: daily_orders
+    title: Daily Orders (Avg Last 30 Days)
+    config:
+      aggregation: avg
+      value_field: order_count
+      format: number
+    style:
+      color: purple
+      size: medium
+    position:
+      row: 0
+      col: 0
+      width: 6
+      height: 2
+
+  - id: avg-order-value-kpi
+    type: kpi
+    chart: null
+    query_ref: daily_orders
+    title: Average Order Value
+    config:
+      aggregation: avg
+      value_field: avg_order_value
+      format: currency
+    style:
+      color: orange
+      size: medium
+    position:
+      row: 0
+      col: 6
+      width: 6
+      height: 2
