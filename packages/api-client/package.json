@@ -1,0 +1,25 @@
+{
+  "name": "@peter/api-client",
+  "version": "0.1.0",
+  "description": "Auto-generated TypeScript API client for Peter dashboard platform",
+  "private": true,
+  "type": "module",
+  "main": "./generated/index.ts",
+  "types": "./generated/index.ts",
+  "exports": {
+    ".": "./generated/index.ts"
+  },
+  "scripts": {
+    "generate": "openapi-typescript-codegen --input ../../apps/api/src/openapi.yaml --output ./generated --client axios --useUnionTypes --exportSchemas true",
+    "clean": "rm -rf ./generated"
+  },
+  "dependencies": {
+    "axios": "^1.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.2",
+    "form-data": "^4.0.4",
+    "openapi-typescript-codegen": "^0.29.0",
+    "typescript": "^5.3.3"
+  }
+}
