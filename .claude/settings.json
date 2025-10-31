@@ -1,0 +1,104 @@
+{
+  "hooks": {
+    "pre-commit": {
+      "description": "Validate OpenAPI schema and regenerate client before commit",
+      "command": "python scripts/openapi.py validate && pnpm run codegen:api-client",
+      "blocking": true
+    },
+    "post-pull": {
+      "description": "Sync dependencies and run migrations after pulling changes",
+      "command": "pnpm install && cd apps/api && alembic upgrade head",
+      "blocking": false
+    }
+  },
+  "proactive_agents": {
+    "backend-agent": {
+      "triggers": [
+        "create endpoint",
+        "add model",
+        "setup cache",
+        "implement LLM streaming",
+        "add migration",
+        "setup RLS",
+        "implement cost tracking",
+        "add circuit breaker",
+        "optimize query"
+      ]
+    },
+    "frontend-agent": {
+      "triggers": [
+        "create component",
+        "build page",
+        "implement UI",
+        "setup state",
+        "add form",
+        "style with Tailwind",
+        "implement SSE streaming",
+        "add error boundary",
+        "optimize performance",
+        "add accessibility"
+      ]
+    },
+    "integration-agent": {
+      "triggers": [
+        "generate API client",
+        "validate schema",
+        "setup error handling",
+        "add tracing",
+        "write E2E test",
+        "test integration",
+        "add observability",
+        "monitor performance"
+      ]
+    }
+  },
+  "skills": {
+    "openapi-manager": {
+      "description": "Manage OpenAPI schema, validate, and generate TypeScript client",
+      "auto_validate": true,
+      "auto_generate_client": true
+    },
+    "dev-server": {
+      "description": "Start, stop, monitor all services during development",
+      "auto_start_on_session": false
+    }
+  },
+  "mvp_context": {
+    "timeline": "3 weeks",
+    "target_users": "~10 users",
+    "must_have_features": 18,
+    "architecture": "merged monolith (api + scraper)",
+    "tech_stack": {
+      "backend": "FastAPI + SQLAlchemy + Alembic + Postgres + Redis",
+      "frontend": "Next.js 15 + React 18 + TanStack Query + Zustand + shadcn/ui",
+      "llm": "Claude + Gemini with SSE streaming",
+      "observability": "OpenTelemetry + Structlog"
+    },
+    "critical_constraints": [
+      "RLS (Row-Level Security) on all user data",
+      "Cost tracking for all external API calls",
+      "Idempotency keys for all mutations",
+      "Normalized cache keys (L1 Redis + L2 Postgres)",
+      "OpenAPI as Single Source of Truth"
+    ],
+    "week_1_focus": "Foundation (auth, DB, design system, API client)",
+    "week_2_focus": "Core features (CRUD, LLM chat, caching, streaming)",
+    "week_3_focus": "Polish (discovery, error handling, testing, performance)"
+  },
+  "references": {
+    "backend_pdr": "docs-pdr/backend_pdr.md",
+    "frontend_pdr": "docs-pdr/frontend_pdr.md",
+    "ui_design_system": "docs-pdr/ui_design_system.md",
+    "project_agents": "docs-pdr/project_agents.md",
+    "openapi_schema": "apps/api/src/openapi.json"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Read",
+      "Edit",
+      "Write"
+    ]
+  }
+}

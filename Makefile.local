@@ -1,0 +1,51 @@
+# Local Development without Docker
+# =====================================
+# For developers who have PostgreSQL/Redis installed locally
+
+.PHONY: help-local
+help-local: ## Show local development commands
+	@echo "Local Development (No Docker Required)"
+	@echo "======================================"
+	@echo ""
+	@echo "Prerequisites:"
+	@echo "  - PostgreSQL 14+ running locally"
+	@echo "  - Redis 7+ running locally (optional)"
+	@echo ""
+	@echo "Setup:"
+	@echo "  1. Ensure PostgreSQL is running on localhost:5432"
+	@echo "  2. Create database: createdb peter_db"
+	@echo "  3. Update .env DATABASE_URL to use localhost"
+	@echo "  4. Run: make setup-local"
+	@echo ""
+
+.PHONY: setup-local
+setup-local: ## Setup without Docker (requires local postgres)
+	@echo "🚀 Setting up Peter Dashboard (Local PostgreSQL)..."
+	@echo ""
+	@echo "1/3 Installing Python dependencies..."
+	cd apps/api && uv sync --dev
+	@echo ""
+	@echo "2/3 Running migrations..."
+	cd apps/api && uv run alembic upgrade head
+	@echo ""
+	@echo "3/3 Seeding database..."
+	cd apps/api && uv run python scripts/seed_db.py
+	@echo ""
+	@echo "✅ Setup complete!"
+	@echo ""
+	@echo "Start development with: make dev-local"
+
+.PHONY: dev-local
+dev-local: ## Start API with local PostgreSQL
+	@echo "Starting API server (using local PostgreSQL)..."
+	cd apps/api && uv run uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+.PHONY: test-local
+test-local: ## Run tests with local PostgreSQL
+	cd apps/api && uv run pytest
+
+.PHONY: db-create-local
+db-create-local: ## Create local database
+	@echo "Creating peter_db database..."
+	createdb peter_db || echo "Database might already exist"
+	@echo "✓ Database created or already exists"
