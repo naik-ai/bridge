@@ -1,0 +1,116 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: peter-postgres
+    environment:
+      POSTGRES_USER: peter_user
+      POSTGRES_PASSWORD: peter_dev_password
+      POSTGRES_DB: peter_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U peter_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: peter-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: peter-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      # Database
+      DATABASE_URL: postgresql+asyncpg://peter_user:peter_dev_password@postgres:5432/peter_db
+
+      # Redis
+      CACHE_TYPE: redis
+      REDIS_URL: redis://redis:6379/0
+
+      # API
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      CORS_ORIGINS: http://localhost:3000,http://web:3000
+
+      # Environment
+      ENVIRONMENT: development
+      DEBUG: "true"
+      LOG_LEVEL: DEBUG
+
+      # BigQuery (mount credentials or use Secret Manager in production)
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
+      BIGQUERY_DATASET: ${BIGQUERY_DATASET:-analytics}
+      BIGQUERY_MAX_BYTES_BILLED: 100000000
+
+      # Auth (set these in .env file)
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-in-production}
+      SESSION_COOKIE_SECURE: "false"
+      ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
+    volumes:
+      - ./apps/api:/app
+      - ~/.config/gcloud:/root/.config/gcloud:ro  # Mount GCP credentials for local dev
+    command: uv run uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: peter-web
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:8000/api/v1
+      NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NODE_ENV: development
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    command: pnpm dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: peter-network

@@ -1,0 +1,46 @@
+{
+  "name": "peter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Peter - LLM-assisted dashboard platform",
+  "engines": {
+    "node": ">=18.17.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@8.15.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "dev:api": "cd apps/api && uv run uvicorn src.main:app --reload --port 8000",
+    "dev:all": "concurrently \"pnpm dev:api\" \"pnpm dev\"",
+    "build": "pnpm --filter web build",
+    "build:api": "cd apps/api && docker build -t peter-api .",
+    "typecheck": "pnpm --filter web typecheck",
+    "lint": "pnpm --filter web lint",
+    "lint:fix": "pnpm --filter web lint --fix",
+    "test": "pnpm --filter web test",
+    "test:e2e": "pnpm --filter web test:e2e",
+    "codegen:api-client": "pnpm --filter web codegen:api-client",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "clean": "pnpm -r exec rm -rf node_modules dist .next .turbo",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,mdx}\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "concurrently": "^8.2.2",
+    "prettier": "^3.2.4",
+    "typescript": "^5.3.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "next": "^15.0.0",
+      "react": "^18.2.0",
+      "react-dom": "^18.2.0"
+    }
+  }
+}
