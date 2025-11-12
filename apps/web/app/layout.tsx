@@ -1,17 +1,11 @@
-/**
- * Root Layout
- *
- * Wraps entire app with providers and sets up fonts.
- */
-
 import type { Metadata } from 'next';
-import '@fontsource-variable/inter';
 import './globals.css';
-import { Providers } from '@/components/providers';
+import { QueryProvider } from '@/providers/query-provider';
+import { ThemeProvider } from '@/providers/theme-provider';
 
 export const metadata: Metadata = {
   title: 'Peter - Dashboard Platform',
-  description: 'Data exploration and dashboard authoring',
+  description: 'LLM-assisted dashboard platform for data visualization',
 };
 
 export default function RootLayout({
@@ -22,7 +16,14 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className="font-sans antialiased">
-        <Providers>{children}</Providers>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="light"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <QueryProvider>{children}</QueryProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

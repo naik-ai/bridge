@@ -1,48 +1,150 @@
-@import 'tailwindcss';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-@theme {
-  --color-background: oklch(100% 0 0);
-  --color-foreground: oklch(10% 0 0);
-  --color-card: oklch(100% 0 0);
-  --color-card-foreground: oklch(10% 0 0);
-  --color-popover: oklch(100% 0 0);
-  --color-popover-foreground: oklch(10% 0 0);
-  --color-primary: oklch(10% 0 0);
-  --color-primary-foreground: oklch(98% 0 0);
-  --color-secondary: oklch(96% 0 0);
-  --color-secondary-foreground: oklch(10% 0 0);
-  --color-muted: oklch(96% 0 0);
-  --color-muted-foreground: oklch(45% 0 0);
-  --color-accent: oklch(96% 0 0);
-  --color-accent-foreground: oklch(10% 0 0);
-  --color-destructive: oklch(60% 0.2 25);
-  --color-destructive-foreground: oklch(98% 0 0);
-  --color-border: oklch(90% 0 0);
-  --color-input: oklch(90% 0 0);
-  --color-ring: oklch(10% 0 0);
-  --radius: 0.5rem;
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 4%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 4%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 4%;
+    --primary: 0 0% 4%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 4%;
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 45%;
+    --accent: 0 0% 96%;
+    --accent-foreground: 0 0% 4%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 0 0% 4%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 0 0% 4%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 4%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 4%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 4%;
+    --secondary: 0 0% 15%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 15%;
+    --muted-foreground: 0 0% 64%;
+    --accent: 0 0% 15%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62% 30%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 25%;
+    --input: 0 0% 25%;
+    --ring: 0 0% 83%;
+  }
 }
 
-@media (prefers-color-scheme: dark) {
-  @theme {
-    --color-background: oklch(10% 0 0);
-    --color-foreground: oklch(98% 0 0);
-    --color-card: oklch(10% 0 0);
-    --color-card-foreground: oklch(98% 0 0);
-    --color-popover: oklch(10% 0 0);
-    --color-popover-foreground: oklch(98% 0 0);
-    --color-primary: oklch(98% 0 0);
-    --color-primary-foreground: oklch(10% 0 0);
-    --color-secondary: oklch(15% 0 0);
-    --color-secondary-foreground: oklch(98% 0 0);
-    --color-muted: oklch(15% 0 0);
-    --color-muted-foreground: oklch(65% 0 0);
-    --color-accent: oklch(15% 0 0);
-    --color-accent-foreground: oklch(98% 0 0);
-    --color-destructive: oklch(30% 0.15 25);
-    --color-destructive-foreground: oklch(98% 0 0);
-    --color-border: oklch(20% 0 0);
-    --color-input: oklch(20% 0 0);
-    --color-ring: oklch(83% 0 0);
+@layer base {
+  * {
+    @apply border-border;
   }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    font-variant-numeric: tabular-nums;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold;
+  }
+  h1 {
+    @apply text-4xl;
+  }
+  h2 {
+    @apply text-3xl;
+  }
+  h3 {
+    @apply text-2xl;
+  }
+  h4 {
+    @apply text-xl;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Custom scrollbar styles */
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-border rounded-md;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground;
+  }
+}
+
+/* Panel resize handle styles */
+.resize-handle {
+  @apply bg-border hover:bg-primary/20 active:bg-primary/30 transition-colors;
+}
+
+.resize-handle-horizontal {
+  @apply w-1 cursor-col-resize;
+}
+
+.resize-handle-vertical {
+  @apply h-1 cursor-row-resize;
+}
+
+/* Freshness indicator styles */
+.freshness-badge {
+  @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium;
+}
+
+.freshness-fresh {
+  @apply bg-success/10 text-success border border-success/20;
+}
+
+.freshness-stale {
+  @apply bg-warning/10 text-warning border border-warning/20;
+}
+
+.freshness-old {
+  @apply bg-error/10 text-error border border-error/20;
+}
+
+.freshness-unknown {
+  @apply bg-muted text-muted-foreground border border-border;
+}
+
+/* Animation for new data indicator */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }

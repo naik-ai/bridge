@@ -1,11 +1,5 @@
-/**
- * Home Page
- *
- * Redirects to dashboards gallery.
- */
+import { AppShell } from '@/components/layout/app-shell';
 
-import { redirect } from 'next/navigation';
-
-export default function HomePage() {
-  redirect('/dashboards');
+export default function Home() {
+  return <AppShell />;
 }
