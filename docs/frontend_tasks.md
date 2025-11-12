@@ -14,7 +14,7 @@
 - **Phase 3.2**: ⏳ In Progress (Dashboard Widgets)
 - **Phase 4**: ⏳ Pending (Dashboard Pages & Data Fetching)
 - **Phase 5**: ✅ Complete (YAML Editor & Dashboard Editing)
-- **Phase 0**: ⏳ Pending (Team Onboarding Wizard)
+- **Phase 0**: ✅ Complete (Team Onboarding Wizard)
 
 ---
 
@@ -250,140 +250,141 @@
 
 ---
 
-## Phase 0: Team Onboarding Wizard ⏳ PENDING
+## Phase 0: Team Onboarding Wizard ✅ COMPLETE
 
-**Duration**: ~12 hours | **Priority**: HIGH - Required before dashboard creation
-**PDR Reference**: Frontend PDR §0
-**Dependencies**: Backend Phase 0 complete
+**Duration**: Completed 2025-11-12 (~6 hours actual)
+**PDR Reference**: Frontend PDR §0 (Simplified to 3-step flow)
+**Dependencies**: Backend Phase 0 ✅
 
-### 0.1 State Management (2 hours)
+**Note**: Implemented simplified 3-step wizard (Team → Connection → Catalog). Deferred member invites, job polling, and complex multi-panel layouts to Phase X post-MVP.
 
-**File**: src/stores/onboardingStore.ts
+### 0.1 State Management ✅
 
-- [ ] Create Zustand onboarding store
-  - State: currentStep (1-13), completedSteps[], team, connection, datasets, tables, etc.
-  - Actions: nextStep, previousStep, jumpToStep, completeStep
-  - Setters: setTeam, setConnection, addDatasets, addTables
-- [ ] Implement sessionStorage persistence
-  - Save on every state change
-  - Load on mount
-  - Key: `bridge_onboarding_state_{team_slug}`
-- [ ] Add validation helpers:
-  - canProceed(currentStep): boolean
-  - getStepProgress(step): {completed, progress}
-  - getOverallProgress(): number (percentage)
+**File**: `src/lib/store/onboarding.ts`
 
-### 0.2 API Integration Hooks (2 hours)
+- [x] Create Zustand onboarding store with devtools
+  - State: currentStep ('team' | 'connection' | 'catalog'), teamData, connectionData, catalogData
+  - State: teamId, connectionId, completion flags per step
+  - Actions: setCurrentStep, setTeamData, setConnectionData, setCatalogData
+  - Actions: goToNextStep, goToPreviousStep, resetOnboarding
+- [x] Implement sessionStorage persistence
+  - Automatic persistence via zustand/middleware
+  - Storage key: "onboarding-storage"
+  - Clears on resetOnboarding()
+- [x] Simplified state model (no step numbering or complex progress tracking in MVP)
 
-**File**: src/hooks/useOnboardingAPI.ts
+### 0.2 API Integration Hooks ✅
 
-- [ ] Create TanStack Query hooks:
-  - useCreateTeam, useInviteMembers
-  - useCreateConnection, useValidateConnection
-  - useTriggerCatalogScan, useCatalogJob (polling)
-  - useDatasets, useTables
-- [ ] Implement job polling pattern:
-  - useJobPolling(jobId, jobType)
-  - Polls every 2 seconds while status is "running"
-  - Updates store with progress
-  - Stops when "completed" or "failed"
-- [ ] Add error handling:
-  - Network errors: Retry with exponential backoff
-  - 401: Redirect to login
-  - 422: Field-level validation errors
-  - 500: Show error with trace ID
+**File**: `src/hooks/use-onboarding.ts`
 
-### 0.3 Shared Components (3 hours)
+- [x] Create TanStack Query hooks:
+  - useCreateTeam, useTeams
+  - useCreateConnection, useTestConnection, useConnections
+  - useDiscoverDatasets, useScanDataset, useDatasetTables
+- [x] Implement mutations with cache invalidation:
+  - useCreateTeam invalidates ['teams']
+  - useCreateConnection invalidates ['connections', team_id]
+  - useTestConnection invalidates ['connections', team_id]
+  - useDiscoverDatasets invalidates ['datasets', connection_id]
+  - useScanDataset invalidates ['tables', dataset_id]
+- [x] Error handling via TanStack Query error states (no custom retry logic in MVP)
+- [x] Note: Deferred job polling to Phase X (synchronous scans only in MVP)
 
-#### 0.3.1 OnboardingLayout
-**File**: src/components/onboarding/OnboardingLayout.tsx
+### 0.3 Shared Components ✅
 
-- [ ] Three-panel layout:
-  - 240px sidebar (step list)
-  - Flex center (active step content)
-  - 320px help panel (context-sensitive tips)
-- [ ] Header: Logo, "Bridge Onboarding", Help button, Exit button
-- [ ] Footer: Back button, Progress indicator, Next button
-- [ ] Sidebar: Vertical step list with checkmarks for completed steps
-- [ ] Responsive: Collapse sidebar/help on <1024px
+#### 0.3.1 OnboardingLayout ✅
+**File**: `src/components/onboarding/OnboardingLayout.tsx`
 
-#### 0.3.2 StepHeader
-**File**: src/components/onboarding/StepHeader.tsx
+- [x] Simplified single-panel layout:
+  - Horizontal progress indicator at top (3 steps with checkmarks)
+  - Center card (max-width: 4xl) for step content
+  - No sidebar or help panel (deferred to Phase X)
+- [x] Progress bar shows: step number, label, completion checkmark
+- [x] Active step highlighted with monotone theme
+- [x] Responsive: Works on all screen sizes
+- [x] Note: Deferred complex three-panel layout to Phase X
 
-- [ ] Props: stepNumber, title, description
-- [ ] Display: "Step N of 3" badge, h2 title, description paragraph
-- [ ] Monotone styling
+#### 0.3.2 Textarea Component ✅
+**File**: `src/components/ui/textarea.tsx`
 
-#### 0.3.3 FileUpload
-**File**: src/components/onboarding/FileUpload.tsx
+- [x] ShadCN UI textarea component
+- [x] Used for JSON credentials input
+- [x] Monospace font for code display
+- [x] Monotone theme compliant
 
-- [ ] Drag-and-drop zone (240px height)
-- [ ] File validation: JSON only
-- [ ] Shows file name and size after upload
-- [ ] Remove button, loading spinner, error state
+### 0.4 Step Components ✅
 
-#### 0.3.4 JobProgressCard
-**File**: src/components/onboarding/JobProgressCard.tsx
+**Simplified 3-Step Flow**:
 
-- [ ] Props: jobStatus, progress (0-100), message
-- [ ] Progress bar with status icon
-- [ ] Auto-updates via polling hook
+#### Step 1: Team Creation ✅
+**File**: `src/components/onboarding/TeamCreationStep.tsx`
 
-### 0.4 Step Components (5 hours)
+- [x] Team name input with auto-generated slug
+- [x] Slug input (editable, validated for lowercase/hyphens/numbers)
+- [x] Form validation: name and slug required, slug pattern check
+- [x] API call: useCreateTeam mutation
+- [x] Loading states with spinner
+- [x] Error display with Alert component
+- [x] On success: Save team to store, navigate to next step
+- [x] Note: Deferred member invites to Phase X
 
-**Simplified 3-Step Flow** (per task_reorganization_plan.md):
+#### Step 2: Connection Setup ✅
+**File**: `src/components/onboarding/ConnectionSetupStep.tsx`
 
-#### Step 1: Team Creation (1.5 hours)
-**File**: src/components/onboarding/Step1TeamCreation.tsx
+- [x] Connection name input
+- [x] Tabbed database type selector (BigQuery/Postgres/Snowflake)
+- [x] Textarea for JSON credentials input (no file upload in MVP)
+- [x] "Create & Test Connection" button
+- [x] Auto-test after connection creation
+- [x] Status display: testing (spinner), success (green checkmark), failed (error)
+- [x] Retry test button if failed
+- [x] Back button to previous step
+- [x] Continue button (enabled only if test successful)
+- [x] API calls: useCreateConnection, useTestConnection
+- [x] On success: Save connection to store, navigate to next step
+- [x] Enhanced: Multi-database support vs BigQuery-only in original spec
 
-- [ ] Team name input (auto-generates slug)
-- [ ] Slug preview (editable)
-- [ ] Admin user display (current user)
-- [ ] Member invite fields (optional, email + role)
-- [ ] Add/remove invite buttons
-- [ ] Validation: Team name required, slug unique
-- [ ] API call: useCreateTeam, useInviteMembers
-- [ ] On success: Save team to store, mark step complete, next step
+#### Step 3: Catalog Scan ✅
+**File**: `src/components/onboarding/CatalogScanStep.tsx`
 
-#### Step 2: Connection Setup (1.5 hours)
-**File**: src/components/onboarding/Step2ConnectionSetup.tsx
+- [x] Auto-discover datasets on mount
+- [x] Dataset list with checkboxes for selection
+- [x] Individual "Scan" button per dataset
+- [x] "Scan Selected" button for bulk scanning
+- [x] Display scan results: table count per dataset
+- [x] "Finish Setup" button redirects to /dashboards
+- [x] Reset onboarding state on finish
+- [x] API calls: useDiscoverDatasets, useScanDataset, useDatasetTables
+- [x] Note: Synchronous scans only (no job polling in MVP)
 
-- [ ] Connection name input
-- [ ] Warehouse type dropdown (BigQuery only for MVP)
-- [ ] FileUpload component for service account JSON
-- [ ] "Validate Connection" button
-- [ ] Validation progress indicator
-- [ ] Display validation result:
-  - Success: Green checkmark, permissions summary
-  - Failed: Red X, error message, retry button
-- [ ] API calls: useCreateConnection, useValidateConnection
-- [ ] On success: Save connection to store, mark step complete, next step
-
-#### Step 3: Catalog Scan (2 hours)
-**File**: src/components/onboarding/Step3CatalogScan.tsx
-
-- [ ] "Start Catalog Scan" button
-- [ ] JobProgressCard for scan progress
-- [ ] Real-time updates via useJobPolling
-- [ ] Display scan results:
-  - Datasets found: N
-  - Tables found: M
-  - Scan duration: Xs
-- [ ] Preview table: List of datasets with table counts
-- [ ] "Continue to Dashboard Creation" button
-- [ ] API calls: useTriggerCatalogScan, useCatalogJob
-- [ ] On success: Save datasets/tables to store, mark onboarding complete, redirect to /dashboards
-
-### 0.5 Onboarding Route (1 hour)
+### 0.5 Onboarding Route ✅
 
 **Route**: `/onboarding`
+**File**: `src/app/onboarding/page.tsx`
 
-- [ ] Create onboarding page (src/app/onboarding/page.tsx)
-- [ ] Load onboarding store on mount
-- [ ] Render OnboardingLayout with active step
-- [ ] Handle navigation between steps
-- [ ] Save state to sessionStorage
-- [ ] On completion: Clear session, redirect to /dashboards
+- [x] Client component renders OnboardingLayout
+- [x] Conditionally renders step components based on currentStep
+- [x] Store automatically persists to sessionStorage
+- [x] State resets on onboarding completion
+- [x] Redirects to /dashboards after completion
+
+**Files Created**:
+- `src/lib/store/onboarding.ts` (Zustand store with sessionStorage)
+- `src/types/onboarding.ts` (TypeScript types for API entities)
+- `src/hooks/use-onboarding.ts` (TanStack Query hooks)
+- `src/components/onboarding/OnboardingLayout.tsx` (Progress indicator + card layout)
+- `src/components/onboarding/TeamCreationStep.tsx` (Step 1)
+- `src/components/onboarding/ConnectionSetupStep.tsx` (Step 2)
+- `src/components/onboarding/CatalogScanStep.tsx` (Step 3)
+- `src/app/onboarding/page.tsx` (Route)
+- `src/components/ui/textarea.tsx` (ShadCN UI component)
+
+**Deferred to Phase X** (post-MVP):
+- Member invite functionality
+- Job polling for async scans
+- Three-panel layout with help panel
+- Drag-and-drop file upload
+- Complex progress tracking and step validation
 
 ---
 
@@ -608,6 +609,95 @@
 - [ ] Conduct usability tests
 - [ ] Collect feedback
 - [ ] Prioritize improvements
+
+---
+
+## Phase X: Extended Onboarding Wizard (Deferred)
+
+**Status**: ⏸️ Deferred until backend reinstates full Phase 0 services (PII, dbt, doc crawl, governance, cost, report). These notes capture the original 13-step plan so we can safely delete `docs/task.md`.
+
+### X.1 State Management & API Layer
+- [ ] Expand `src/stores/onboardingStore.ts` to include invites, catalog job metadata, dataset/table/column caches, PII detections, dbt artifacts, doc sources, glossary terms, business goals, workspace preferences, policies, cost estimates, verification jobs, and report payloads
+- [ ] Restore actions (`nextStep`, `previousStep`, `jumpToStep`, `completeStep`, `approvePII`, `setDbtArtifacts`, `setDocSource`, etc.) plus helpers (`canProceed`, `getStepProgress`, `getOverallProgress`)
+- [ ] Re-enable sessionStorage middleware (save/load/clear) keyed by `bridge_onboarding_state_{team_slug}`
+- [ ] Bring back full TanStack Query hook suite: create/invite team, create/validate connection, trigger catalog scans, list datasets/tables/columns, trigger + poll PII/dbt/doc/glossary/goal/cost/preference/report jobs, list glossary/goals/policies/preferences, etc.
+- [ ] Reintroduce `useJobPolling(jobId, jobType)` that polls every 2s until `completed`/`failed` and hydrates the store
+
+### X.2 Full 13-Step Flow
+
+#### Step 4: Scan Data Catalog _(45 min)_
+- [ ] StepHeader copy, explanation text about INFORMATION_SCHEMA scans
+- [ ] CTA button to begin scan (`useTriggerCatalogScan`)
+- [ ] JobProgressCard polling via `useJobPolling` every 2 seconds
+- [ ] Result summary: datasets/tables/columns counts formatted as KPIs
+- [ ] Error handling + retry button if job fails
+- [ ] Next button enabled only when job status === `completed`
+
+#### Step 5: Review PII Detection _(1 hour)_
+- [ ] Fire `useTriggerPIIDetection` on mount and display JobProgressCard
+- [ ] Load pending detections via `usePIIDetections` when job completes (status filter support)
+- [ ] Render ReviewTable with columns (dataset.table, column, pattern, ConfidenceBadge, actions)
+- [ ] Wire `useApprovePII` / `useRejectPII` and bulk-approve (confidence ≥0.7) plus summary stats
+- [ ] Allow skip only after all pending detections are reviewed (or none remain)
+
+#### Step 6: Upload dbt Artifacts _(45 min, optional)_
+- [ ] Two FileUpload controls (manifest.json + catalog.json) backed by `useUploadDbtManifest` / `useUploadDbtCatalog`
+- [ ] Drift detection CTA that becomes active after catalog upload, uses `useDriftReport`
+- [ ] Results tables highlighting missing/extra/type-mismatch columns
+- [ ] Skip button + always-on Next button
+
+#### Step 7: Crawl Documentation _(1 hour, optional)_
+- [ ] Form for source type/base URL/auth token (validation + password fields)
+- [ ] Crawl trigger calling `useTriggerDocCrawl` with JobProgressCard + rate-limit notice
+- [ ] Glossary extraction CTA, second JobProgressCard, glossary preview table (term/definition/datasets/confidence)
+- [ ] Skip support + always-on Next button
+
+#### Step 8: Map Business Goals _(1 hour)_
+- [ ] Capture goals via textarea + add/remove controls plus example chips
+- [ ] Trigger mapping job (`useTriggerGoalMapping`), display JobProgressCard + result table (goal, mapped datasets, ConfidenceBadge, reasoning accordion)
+- [ ] Skip permitted only if zero goals entered; otherwise gate Next on job completion
+
+#### Step 9: Review Governance Policies _(45 min)_
+- [ ] Auto-trigger `useGeneratePolicies`, show spinner while running
+- [ ] Policies table: dataset, column, policy type, syntax-highlighted SQL, reason tooltip, admin-only approve/dismiss actions
+- [ ] Summary stats (“N generated, M approved”), Next always enabled
+
+#### Step 10: Estimate Costs _(45 min)_
+- [ ] Fetch `useCostEstimate` on mount and render KPI tiles (cost/query, estimated monthly, bytes scanned)
+- [ ] Add explanatory copy about assumptions (top 10 tables, 10% scans)
+- [ ] Verification section: trigger `useTriggerVerification`, JobProgressCard, results table (table name, bytes scanned, dry-run status)
+- [ ] Next always enabled
+
+#### Step 11: Configure Preferences _(30 min)_
+- [ ] Fire `useGeneratePreferences` on mount, hydrate form fields (view type, date format, timezone, number format, theme)
+- [ ] Allow overrides + `useUpdatePreferences` mutation with success toast
+- [ ] Next always enabled
+
+#### Step 12: Generate Report _(45 min)_
+- [ ] Generate button calling `useGenerateReport`, show spinner while running
+- [ ] Render HTML summary (exec summary, catalog, PII, goals, governance, cost KPIs, checklist) with monotone styling
+- [ ] Highlight that PDF export is intentionally removed
+- [ ] Gate Next until report job completes
+
+#### Step 13: Completion & Next Steps _(30 min)_
+- [ ] Celebration view with KPI tiles (datasets connected, tables scanned, PII columns reviewed, goals mapped)
+- [ ] Next-steps list (“Create your first dashboard”, “Explore data catalog”, “Invite more members”, “Review governance policies”)
+- [ ] CTA buttons: Go to Dashboards (primary) + Explore Data Catalog (secondary)
+- [ ] Clear onboarding session storage on mount to prevent stale progress
+
+### X.3 Supporting Infrastructure
+
+#### Routing & Navigation _(1 hour)_
+- [ ] Re-add onboarding layout + per-step routes, guard navigation to future steps, exit confirmation modal, beforeunload protection
+
+#### Accessibility & Responsive Design _(1 hour)_
+- [ ] WCAG AA checklist: keyboard navigation, focus rings, ARIA labels, step change announcements, responsive collapse for sidebar/help panels, 44px touch targets, axe-core sweep
+
+#### Testing _(2 hours)_
+- [ ] Recreate store unit tests, component tests (FileUpload, JobProgressCard, ReviewTable, ConfidenceBadge), integration + E2E coverage for full 13-step flow (happy path, skip optional steps, resume via persistence, error states)
+
+#### Documentation & Client Regeneration _(30 minutes)_
+- [ ] Regenerate API client once backend endpoints return, refresh onboarding README/screenshots/developer guide, and update CLAUDE.md with extended onboarding details
 
 ---
 
