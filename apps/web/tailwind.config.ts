@@ -1,4 +1,5 @@
 import type { Config } from 'tailwindcss';
+import { tokens } from './src/lib/tokens';
 
 const config: Config = {
   darkMode: ['class'],
@@ -18,6 +19,35 @@ const config: Config = {
     },
     extend: {
       colors: {
+        // Monotone palette from tokens (UI chrome only)
+        'bg-primary': tokens.colors.bg.primary,
+        'bg-secondary': tokens.colors.bg.secondary,
+        'bg-tertiary': tokens.colors.bg.tertiary,
+        'bg-inverse': tokens.colors.bg.inverse,
+        'text-primary': tokens.colors.text.primary,
+        'text-secondary': tokens.colors.text.secondary,
+        'text-tertiary': tokens.colors.text.tertiary,
+        'text-inverse': tokens.colors.text.inverse,
+
+        // Semantic colors from tokens (data/status only)
+        success: {
+          DEFAULT: tokens.colors.semantic.success,
+          foreground: 'hsl(142 76% 95%)',
+        },
+        warning: {
+          DEFAULT: tokens.colors.semantic.warning,
+          foreground: 'hsl(38 92% 95%)',
+        },
+        error: {
+          DEFAULT: tokens.colors.semantic.error,
+          foreground: 'hsl(0 72% 95%)',
+        },
+        neutral: {
+          DEFAULT: tokens.colors.semantic.neutral,
+          foreground: 'hsl(0 0% 95%)',
+        },
+
+        // ShadCN compatibility layer (keep for existing components)
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
@@ -51,23 +81,17 @@ const config: Config = {
           DEFAULT: 'hsl(var(--card))',
           foreground: 'hsl(var(--card-foreground))',
         },
-        success: {
-          DEFAULT: 'hsl(142 71% 45%)',
-          foreground: 'hsl(142 71% 95%)',
-        },
-        warning: {
-          DEFAULT: 'hsl(38 92% 50%)',
-          foreground: 'hsl(38 92% 95%)',
-        },
-        error: {
-          DEFAULT: 'hsl(0 84% 60%)',
-          foreground: 'hsl(0 84% 95%)',
-        },
       },
+      spacing: tokens.space,
       borderRadius: {
-        lg: 'var(--radius)',
-        md: 'calc(var(--radius) - 2px)',
-        sm: 'calc(var(--radius) - 4px)',
+        none: tokens.radii.none,
+        sm: tokens.radii.sm,
+        md: tokens.radii.md,
+        lg: tokens.radii.lg,
+        xl: tokens.radii.xl,
+        pill: tokens.radii.pill,
+        // Keep ShadCN compatibility
+        DEFAULT: 'var(--radius)',
       },
       keyframes: {
         'accordion-down': {
@@ -84,9 +108,39 @@ const config: Config = {
         'accordion-up': 'accordion-up 0.2s ease-out',
       },
       fontFamily: {
-        sans: ['var(--font-inter)', 'system-ui', 'sans-serif'],
-        mono: ['var(--font-mono)', 'monospace'],
+        sans: tokens.typography.families.sans.split(',').map((f) => f.trim()),
+        mono: tokens.typography.families.mono.split(',').map((f) => f.trim()),
       },
+      fontSize: {
+        h1: tokens.typography.scale.h1,
+        h2: tokens.typography.scale.h2,
+        h3: tokens.typography.scale.h3,
+        h4: tokens.typography.scale.h4,
+        body: tokens.typography.scale.body,
+        small: tokens.typography.scale.small,
+        tiny: tokens.typography.scale.tiny,
+      },
+      fontWeight: {
+        normal: tokens.typography.weights.normal.toString(),
+        medium: tokens.typography.weights.medium.toString(),
+        semibold: tokens.typography.weights.semibold.toString(),
+        bold: tokens.typography.weights.bold.toString(),
+      },
+      transitionDuration: {
+        instant: tokens.motion.duration.instant,
+        fast: tokens.motion.duration.fast,
+        base: tokens.motion.duration.base,
+        slow: tokens.motion.duration.slow,
+        slower: tokens.motion.duration.slower,
+      },
+      transitionTimingFunction: {
+        'ease-default': tokens.motion.easing.ease,
+        'ease-spring': tokens.motion.easing.spring,
+      },
+      boxShadow: {
+        ...tokens.elevation,
+      },
+      zIndex: tokens.zIndex,
     },
   },
   plugins: [require('tailwindcss-animate')],
