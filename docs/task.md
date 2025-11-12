@@ -644,6 +644,176 @@
 - [ ] Provide CLI/CI script for dashboard index validation _(Notes: Run pre-deploy to prevent stale metadata)_
 - [ ] Document manual remediation flow for drift detection _(Notes: Include runbook entry referencing StorageService)_
 
+### 2.12 Universal AI SDK Infrastructure (PDR §3.1, §4.1, §5.2-§5.3, §7.1)
+**Duration**: ~7 hours | **Priority**: HIGH - Blocks Frontend Phase 1.5 | **Dependencies**: Phase 2.1-2.11
+
+**Context**: Implements GCS-backed session storage, model call logging, deterministic tool caching, and prompt block registry to enable LLM-driven dashboard creation with cost tracking and optimization.
+
+#### 2.12.1 Database Schema - Universal AI SDK Tables (1.5 hours)
+**Files**: `src/models/db_models.py`, new Alembic migration
+
+- [ ] Create `SessionManifest` SQLModel (Postgres pointer to GCS):
+  - Fields: `id` (UUID), `tenant_id`, `user_id`, `team_id`, `dashboard_id`, `gcs_messages_uri`, `summary`, `provider`, `model`, `total_tokens`, `total_cost_usd`, `status`, `created_at`, `updated_at`, `last_message_at`
+  - Foreign keys: `user_id` → `users.id`
+  - Indexes: `idx_user_sessions` (user_id, created_at DESC), `idx_session_status` (status, created_at DESC)
+
+- [ ] Create `ModelCall` SQLModel (token/cost tracking):
+  - Fields: `id`, `session_id`, `provider`, `model`, `input_tokens`, `output_tokens`, `cached_input_tokens`, `cost_usd`, `latency_ms`, `cache_hit`, `error`, `purpose`, `executed_at`
+  - Foreign keys: `session_id` → `sessions.id` ON DELETE CASCADE
+  - Indexes: `idx_session_calls` (session_id, executed_at DESC), `idx_cost_tracking` (executed_at DESC, cost_usd)
+
+- [ ] Create `ToolCache` SQLModel (deterministic cache):
+  - Fields: `id`, `tenant_id`, `tool_name`, `cache_key`, `version`, `gcs_payload_uri`, `ttl_seconds`, `created_at`, `expires_at`, `hit_count`, `last_accessed`
+  - Unique constraint: `cache_key`
+  - Indexes: `idx_cache_lookup` (cache_key, expires_at), `idx_tool_cache` (tool_name, cached_at DESC)
+
+- [ ] Create `Artifact` SQLModel (SHA-256 index for deduplication):
+  - Fields: `id`, `tenant_id`, `session_id`, `artifact_type`, `content_sha256`, `gcs_uri`, `size_bytes`, `mime_type`, `metadata` (JSONB), `created_at`, `deduplicated`
+  - Unique constraint: `content_sha256`
+  - Indexes: `idx_session_artifacts` (session_id, created_at DESC), `idx_artifact_sha` (content_sha256)
+
+- [ ] Create `PromptBlock` SQLModel (registry with cache metadata):
+  - Fields: `id`, `block_name`, `block_type`, `content`, `version`, `cache_control_type`, `is_active`, `created_at`, `updated_at`
+  - Unique constraint: `block_name`
+  - Indexes: `idx_block_name` (block_name, version DESC)
+
+- [ ] Create Alembic migration: `alembic revision --autogenerate -m "Add Universal AI SDK schema"`
+- [ ] Write up/down migration tests
+- [ ] Seed initial prompt blocks (3 blocks): `system_prompt_dashboard_creation`, `bigquery_schema_context`, `context_budget_policy`
+
+**Acceptance Criteria**:
+- ✓ All 5 tables created with proper relationships
+- ✓ Migrations run without errors (`alembic upgrade head`)
+- ✓ SQLModel models fully typed with relationships
+- ✓ Foreign keys validated
+- ✓ Indexes improve query performance (benchmark: session queries <100ms)
+
+#### 2.12.2 GCS Storage Adapter Service (1.5 hours)
+**File**: `src/services/gcs_adapter_service.py`
+
+- [ ] Create `GCSAdapterService` class with constructor injection (db: AsyncSession)
+- [ ] Implement `async upload_session_message(session_id, message_obj) -> str`:
+  - Append JSONL line to `gs://bridge-sessions/{session_id}/messages-{chunk}.jsonl`
+  - Rotate chunk after 10K tokens or 1000 messages
+  - Return GCS URI
+
+- [ ] Implement `async download_session_messages(session_id, limit=100, offset=0) -> List[dict]`:
+  - Read last N messages from GCS (reverse order if needed)
+  - Parse JSONL, return as list of message dicts
+  - Handle multi-chunk sessions (read across files)
+
+- [ ] Implement `async upload_artifact(content, artifact_type, session_id) -> Artifact`:
+  - Calculate SHA-256 hash of content
+  - Check if hash exists in `artifacts` table (deduplication)
+  - If exists: increment reference count, return existing Artifact
+  - If new: upload to GCS `gs://bridge-sessions/{session_id}/artifacts/{sha256}.bin`, create Artifact record
+
+- [ ] Implement `async upload_tool_cache_payload(tool_name, key, payload, ttl) -> str`:
+  - Upload JSON payload to `gs://bridge-cache/{tenant_id}/{tool_name}/{key}.json`
+  - Create `ToolCache` record with expiry (`expires_at = NOW() + ttl`)
+  - Return GCS URI
+
+- [ ] Add retry logic with exponential backoff (3 retries, 2/4/8s delays)
+- [ ] Add GCS bucket lifecycle configuration helper (for TTL enforcement)
+- [ ] Write unit tests with mocked GCS client (use `unittest.mock`)
+
+**Acceptance Criteria**:
+- ✓ Session messages append to GCS JSONL files successfully
+- ✓ Messages retrievable with pagination (limit/offset)
+- ✓ Artifacts deduplicated by SHA-256 (same content → same GCS object)
+- ✓ Tool cache payloads stored with correct TTL
+- ✓ Retry logic handles transient GCS failures (test with fault injection)
+
+#### 2.12.3 Universal AI SDK Orchestrator Service (2 hours)
+**File**: `src/services/universal_ai_orchestrator.py`
+
+- [ ] Create `UniversalAIOrchestrator` class with constructor injection
+- [ ] Integrate **Claude Agent SDK** (Anthropic Python SDK with agentic mode):
+  - Install: `uv pip install anthropic`
+  - Initialize client with API key from Secret Manager
+
+- [ ] Implement `async send_message(session_id, user_message, tools=None) -> AsyncGenerator`:
+  - Load `SessionManifest` from Postgres
+  - Load last 20 messages from GCS via `GCSAdapterService`
+  - Load applicable `PromptBlocks` (with `cache_control` if Anthropic)
+  - Build messages array with cache-control headers:
+    ```python
+    messages = [
+        {"role": "system", "content": system_prompt.content, "cache_control": {"type": "ephemeral"}},
+        {"role": "system", "content": schema_context.content, "cache_control": {"type": "ephemeral"}},
+        ...last_20_messages,
+        {"role": "user", "content": user_message}
+    ]
+    ```
+  - Call Claude SDK with streaming enabled:
+    ```python
+    async with anthropic_client.messages.stream(model="claude-sonnet-4-5", messages=messages) as stream:
+        async for event in stream:
+            yield SSE event (token, tool_call, tool_result, etc.)
+    ```
+  - Log each model call to `ModelCall` table (after completion)
+  - Append user message + assistant response to GCS via `GCSAdapterService`
+  - Update `SessionManifest`: increment `total_tokens`, add to `total_cost_usd`
+
+- [ ] Implement `async execute_tool(tool_name, args, session_id) -> dict`:
+  - Generate deterministic cache key: `tool:{tool_name}:{sha256(canonical_json(args))}`
+  - Check `ToolCache` table: `SELECT * FROM tool_cache WHERE cache_key = ? AND expires_at > NOW()`
+  - **Cache HIT**: Read payload from GCS, increment `hit_count`, return cached result
+  - **Cache MISS**: Execute tool logic, validate result, upload to GCS, insert into `ToolCache`, return fresh result
+
+- [ ] Implement context summarization (rolling summary after >50 messages):
+  - When message count > 50: call LLM with "Summarize this conversation in 3-5 sentences" prompt
+  - Store summary in `SessionManifest.summary`
+  - Truncate old messages from context (keep last 20 + summary)
+
+- [ ] Add circuit breaker for provider failures:
+  - After 3 consecutive failures: switch to fallback (return cached summaries or error gracefully)
+  - Reset circuit after 5 minutes
+
+- [ ] Write integration tests with mocked Claude API (use `respx` or similar)
+- [ ] Write streaming response tests (validate SSE event format)
+
+**Acceptance Criteria**:
+- ✓ Claude SDK integrated and functional
+- ✓ Streaming responses work via `AsyncGenerator` (yields SSE-formatted events)
+- ✓ Model calls logged with token counts and cost
+- ✓ Tool cache hit/miss tracked correctly
+- ✓ Context summarized after 50 messages
+- ✓ Circuit breaker prevents runaway costs on provider failures
+
+#### 2.12.4 Prompt Block Management Service (30 minutes)
+**File**: `src/services/prompt_block_service.py`
+
+- [ ] Create `PromptBlockService` class
+- [ ] Implement `async get_active_blocks(block_names: List[str]) -> List[PromptBlock]`:
+  - Query: `SELECT * FROM prompt_blocks WHERE block_name IN (...) AND is_active = true ORDER BY version DESC`
+  - Return latest version of each block
+
+- [ ] Implement `async create_block(name, content, type, cache_control) -> PromptBlock`:
+  - Insert new block with `version = 1`, `is_active = true`
+
+- [ ] Implement `async update_block(id, content) -> PromptBlock`:
+  - Set old block `is_active = false`
+  - Insert new block with `version = old_version + 1`
+  - Return new block
+
+- [ ] Seed initial blocks in Alembic migration (data migration):
+  ```python
+  op.bulk_insert(prompt_blocks_table, [
+      {"block_name": "system_prompt_dashboard_creation", "content": "You are Peter...", ...},
+      {"block_name": "bigquery_schema_context", "content": "Available datasets...", ...},
+      {"block_name": "context_budget_policy", "content": "Maximum 8000 tokens...", ...}
+  ])
+  ```
+
+- [ ] Write unit tests for CRUD operations
+
+**Acceptance Criteria**:
+- ✓ Blocks retrievable by name
+- ✓ Versioning works correctly (old blocks deactivated, new version created)
+- ✓ Initial blocks seeded automatically during migration
+- ✓ Tests verify all CRUD operations
+
 ## Phase 3: API Endpoints (MVP Only - PDR §3 Endpoints)
 
 **Phase 3 Status**: ✅ COMPLETE - All endpoints implemented (2025-10-30)
@@ -686,12 +856,117 @@
 ### 3.7 Lineage (PDR §7) ✅
 - [x] `GET /v1/lineage/{slug}` - Return nodes + edges JSON
 
-### 3.8 LLM Orchestration API (PDR §4, §8, §11)
-- [ ] `POST /v1/chat/prompt` - Initiate dashboard creation flow _(Notes: Streams assistant responses + verification state)_
-- [ ] `POST /v1/chat/apply` - Persist accepted YAML + metadata _(Notes: Calls StorageService + Precompute hooks)_
-- [ ] Verification loop coordination service _(Notes: Manage retries, surface sample rows, bytes scanned to frontend)_
-- [ ] Prompt template + safety guardrail library _(Notes: Maintainable prompt definitions with audit trail)_
-- [ ] Telemetry: trace chat sessions + link to dashboard slugs _(Notes: Required for Observability criteria)_
+### 3.8 Universal AI SDK Chat API (PDR §4.1, §7.1)
+**Duration**: ~1.5 hours | **Dependencies**: Phase 2.12 complete | **Status**: ⏳ PENDING
+
+**Context**: Exposes HTTP endpoints for session management, chat streaming (SSE), and observability. Wraps Phase 2.12 services for frontend consumption.
+
+#### 3.8.1 Session Management Endpoints (30 minutes)
+**Files**: `src/api/v1/chat.py`, `src/api/v1/sessions.py`
+
+- [ ] `POST /v1/sessions` - Create new chat session
+  - Request body: `{user_id?, provider?, model?, tools?}` (all optional, defaults: current user, "anthropic", "claude-sonnet-4-5", [])
+  - Creates `SessionManifest` in Postgres + GCS manifest.json
+  - Response: `{session_id, provider, model, created_at, gcs_path}`
+  - Status codes: 201 Created, 401 Unauthorized, 500 Internal Error
+
+- [ ] `GET /v1/sessions/current` - Get active session for current user
+  - Query params: None (uses auth context)
+  - Response: `{session_id, summary, total_cost_usd, total_tokens, last_message_at, status}` or `null` if no active session
+  - Status codes: 200 OK, 401 Unauthorized
+
+- [ ] `GET /v1/sessions/:id` - Get session details with metadata
+  - Path params: `id` (session UUID)
+  - Response: `{session_id, user, provider, model, total_tokens, total_cost_usd, summary, created_at, updated_at, status}`
+  - Status codes: 200 OK, 404 Not Found, 403 Forbidden (if not owner)
+
+- [ ] `POST /v1/sessions/:id/archive` - Archive session (soft delete)
+  - Path params: `id` (session UUID)
+  - Sets `SessionManifest.status = 'archived'`
+  - Response: `{session_id, status: "archived"}`
+  - Status codes: 200 OK, 404 Not Found
+
+#### 3.8.2 Chat Streaming Endpoint (SSE) (45 minutes)
+**File**: `src/api/v1/chat.py`
+
+- [ ] `POST /v1/chat` - Send message and stream response via Server-Sent Events
+  - Request body: `{session_id?, message: string, tools?: [...]}` (if no session_id, creates new session)
+  - Response: SSE stream (`Content-Type: text/event-stream`)
+  - SSE event types:
+    * `event: token, data: {content: "..."}`  # Streamed token from LLM
+    * `event: tool_call, data: {tool_name: "...", args: {...}}`  # LLM requested tool
+    * `event: tool_result, data: {tool_call_id: "...", result: {...}, cached: bool}`  # Tool execution result
+    * `event: cost_update, data: {tokens_used: N, cost_usd: X.XX}`  # Running cost (sent periodically)
+    * `event: complete, data: {session_id: "...", total_tokens: N, total_cost: X.XX}`  # End of stream
+    * `event: error, data: {code: "...", message: "..."}`  # Error during streaming
+  - Implementation:
+    ```python
+    @router.post("/chat", response_class=StreamingResponse)
+    async def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user)):
+        async def event_generator():
+            try:
+                async for event in orchestrator.send_message(request.session_id, request.message, request.tools):
+                    yield f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
+            except Exception as e:
+                yield f"event: error\ndata: {json.dumps({'code': 'STREAM_ERROR', 'message': str(e)})}\n\n"
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+    ```
+  - Status codes: 200 OK (stream started), 401 Unauthorized, 404 Session Not Found
+
+- [ ] Add SSE keepalive (send comment line every 30s to prevent timeout):
+  ```python
+  async def event_generator():
+      last_event = time.time()
+      async for event in ...:
+          yield event
+          last_event = time.time()
+      # Send keepalive if >30s since last event
+      if time.time() - last_event > 30:
+          yield ": keepalive\n\n"
+  ```
+
+- [ ] Add connection timeout (5 minutes max stream duration)
+- [ ] Add CORS headers for SSE (required for browser clients):
+  ```python
+  headers = {
+      "Cache-Control": "no-cache",
+      "X-Accel-Buffering": "no",  # Disable nginx buffering
+      "Access-Control-Allow-Origin": settings.cors_origins
+  }
+  ```
+
+- [ ] Handle client disconnect gracefully (cleanup resources, log partial message)
+- [ ] Write SSE client simulation test (use `httpx` with streaming)
+
+#### 3.8.3 Message Retrieval Endpoint (15 minutes)
+**File**: `src/api/v1/sessions.py`
+
+- [ ] `GET /v1/sessions/:id/messages` - Get recent messages from session
+  - Path params: `id` (session UUID)
+  - Query params: `?limit=100` (default 100, max 1000), `?offset=0` (pagination)
+  - Calls `GCSAdapterService.download_session_messages(session_id, limit, offset)`
+  - Response: `{messages: [{id, role, content, timestamp, ...}], total: N, has_more: bool}`
+  - Status codes: 200 OK, 404 Session Not Found
+
+- [ ] Add filtering by role (optional query param `?role=user|assistant|system`)
+  - Filter messages client-side after GCS fetch (or implement GCS JSONL filtering if needed)
+
+#### 3.8.4 Observability Endpoints (20 minutes)
+**File**: `src/api/v1/observability.py`
+
+- [ ] `GET /v1/observability/model-calls` - List model calls with filters
+  - Query params: `?session_id=UUID`, `?provider=anthropic`, `?start_date=YYYY-MM-DD`, `?end_date=YYYY-MM-DD`, `?limit=100`, `?offset=0`
+  - Response: Paginated list of `ModelCall` records
+  - Status codes: 200 OK, 401 Unauthorized (admin only)
+
+- [ ] `GET /v1/observability/cost-summary` - Aggregate cost by user/session/time
+  - Query params: `?user_id=UUID` (optional, defaults to current user), `?group_by=day|week|month` (default: day)
+  - Response: `{total_cost_usd: X.XX, total_tokens: N, breakdown: [{date, cost, tokens}, ...]}`
+  - Status codes: 200 OK
+
+- [ ] `GET /v1/observability/tool-cache-stats` - Cache efficiency metrics
+  - Response: `{hit_rate_pct: XX.XX, total_hits: N, total_misses: M, total_cached_tools: K, storage_size_mb: X.X}`
+  - Status codes: 200 OK
 
 **Phase 3 Deliverables**:
 - ✅ 14 REST endpoints implemented
@@ -1331,6 +1606,220 @@ Backend OpenAPI spec → Auto-generates Pydantic (backend) + TypeScript client (
 
 ---
 
+# 📊 FRONTEND IMPLEMENTATION PRIORITY & READINESS MATRIX
+
+**Last Updated**: 2025-11-03
+**Status**: Reprioritized based on backend readiness analysis
+
+## 🎯 Implementation Priority Order
+
+### **TIER 1: IMMEDIATE - Zero Backend Blockers (Weeks 1-3)**
+Execute these phases NOW. They work with file-based YAML or simple endpoints.
+
+| Phase | Description | Backend Dependency | Status |
+|-------|-------------|-------------------|--------|
+| **Phase 3.2** | Dashboard Widgets (minus auto-refresh) | None (use static YAML files) | ✅ Ready |
+| **Phase 4** | Dashboard Pages & Data Fetching | Optional: `GET /data/:slug` | ✅ Ready |
+| **Phase 5** | YAML Editor & Builder | `POST /dashboards` (simple save) | ✅ Ready |
+| **Phase 7** | Lineage Visualization | Mock JSON initially | ✅ Ready |
+
+### **TIER 2: STUB IMPLEMENTATION - Partial Backend (Week 4)**
+Build UI shell with mocked data. Full integration deferred.
+
+| Phase | Description | Backend Blocker | Defer Until |
+|-------|-------------|-----------------|-------------|
+| **Phase 1.5** | Chat UI Components (STUB ONLY) | Universal AI SDK + GCS storage | Month 2-3 |
+| **Phase 0-MVP** | Minimal Onboarding (6 steps) | Simple catalog endpoints | Week 2 |
+
+### **TIER 3: DEFERRED - Critical Backend Missing (Month 2-3+)**
+Do NOT implement until backend capabilities ship.
+
+| Phase | Description | Backend Blocker | Why Deferred |
+|-------|-------------|-----------------|--------------|
+| **Phase 6** | LLM Dashboard Creation | Session manifest + artifact pipeline + tool orchestration | Requires system_alignment.md Universal AI SDK work |
+| **Phase 3.2.6** | Auto-Refresh & Alerts | Alert feed + cache bust events | No alerting bus exists |
+| **Phase 0 Full** | 13-Step Onboarding | 30+ endpoints + polling loops + PII/doc/policy services | Out of MVP scope, backend not ready |
+
+---
+
+## 🚧 Backend Readiness Gates
+
+### Gate 1: Dashboard Rendering ✅ OPEN
+**Required**:
+- Static YAML files in `/dashboards/` directory (Git-based storage)
+- OR single endpoint: `GET /data/:slug` returning chart data
+
+**Status**: ✅ File system access works, can proceed
+
+---
+
+### Gate 2: YAML Persistence ⚠️ SIMPLE
+**Required**:
+- `POST /dashboards` - Save new dashboard YAML
+- `PUT /dashboards/:id` - Update existing dashboard
+- Validation endpoint (optional): `POST /dashboards/validate`
+
+**Status**: ⚠️ Need to add, low complexity (2-3 hours backend work)
+
+---
+
+### Gate 3: Minimal Onboarding ⚠️ MODERATE
+**Required**:
+- `POST /connections/test` - Validate BigQuery credentials
+- `GET /catalog/datasets` - List available datasets
+- `GET /catalog/tables/:id/schema` - Get table schema
+
+**Status**: ⚠️ Need to add, moderate complexity (1 day backend work)
+
+---
+
+### Gate 4: Lineage Graph ❌ BLOCKED
+**Required**:
+- `GET /lineage/:slug` - Return graph JSON (nodes + edges)
+
+**Status**: ❌ Not prioritized yet, use mock JSON for now
+
+---
+
+### Gate 5: Chat & AI Features ❌ BLOCKED
+**Required** (from system_alignment.md):
+- Universal AI SDK layer (Python)
+- Session manifest table (Postgres metadata)
+- GCS-backed message store (append JSONL chunks)
+- Artifacts table (index) + Tool cache table
+- `/chat` SSE endpoint streaming `text`, `tool_call`, `cost_update` events
+- `/sessions/current` - Session metadata (cost, tokens, provider)
+- `/sessions/:id/messages` - Message history
+
+**Status**: ❌ Major backend work, 2-3 weeks, defer Phase 1.5 full integration
+
+---
+
+### Gate 6: Auto-Refresh & Alerting ❌ BLOCKED
+**Required**:
+- Alert feed (Pub/Sub or WebSocket)
+- Cache invalidation events
+- `/alerts/:dashboard_id` - Active alerts endpoint
+
+**Status**: ❌ Alerting bus not in roadmap, defer indefinitely
+
+---
+
+## 📝 Removed/Reduced Scope Items
+
+### ❌ Phase 0 Bloat REMOVED
+**Original**: 13-step wizard with PII detection, doc crawl, policy approval, business goal mapping, cost verification, summary report generation
+
+**Why Removed**:
+- Onboarding state store pulls almost every backend domain object into client (contradicts thin presentation layer principle)
+- ~30 bespoke endpoints + multiple 2s polling loops would hammer server
+- Services (goal mapping, doc crawl, verification) are aspirational, not implemented
+- Out of MVP scope ("deliver dashboards + chat")
+
+**New Scope**: 6-step minimal onboarding (team name, connection test, catalog scan only)
+
+---
+
+### ❌ Auto-Refresh REMOVED from Phase 3.2
+**Original**: 30s polling loop with alert banners, per-chart freshness updates
+
+**Why Removed**:
+- No backend alert feed or cache invalidation bus
+- Would hammer BigQuery with continuous refreshes
+- Operational dashboard features deferred to post-MVP
+
+**New Scope**: Manual refresh button only
+
+---
+
+### ⚠️ Phase 1.5 STUBBED
+**Original**: Full Vercel AI SDK integration with real SSE streaming
+
+**Why Stubbed**:
+- Backend Universal AI SDK not ready (needs GCS storage, session manifest, artifact pipeline)
+- Cannot test real chat without `/chat` endpoint and session APIs
+
+**New Scope**: UI components with hardcoded mock messages, no real SSE
+
+---
+
+### ❌ Phase 6 DEFERRED
+**Original**: Full LLM dashboard creation, SQL verification display, iterative refinement, "Explain this"
+
+**Why Deferred**:
+- Requires session manifest + GCS artifact pipeline + tool orchestration
+- Depends on Phase 1.5 full implementation
+- Post-MVP feature (Month 2-3)
+
+**New Scope**: Not implemented in initial sprint
+
+---
+
+## 🗓️ Revised Sprint Plan
+
+### Sprint 1: Dashboard Foundation (Days 1-5)
+```
+✅ Phase 3.2 (minus auto-refresh): Dashboard widgets, grid layout, freshness indicators
+✅ Phase 4.1-4.3: TanStack Query hooks, gallery page, dashboard view page
+✅ File-based YAML loading from /dashboards/ directory
+✅ Static or single-endpoint data fetching
+```
+
+**Deliverables**: Working dashboard gallery + view, YAML rendering, charts display
+
+---
+
+### Sprint 2: YAML Editor (Days 6-10)
+```
+✅ Phase 5.1-5.3: YAML parser, validation, editor tabs (Builder/YAML/Preview)
+✅ Two-way sync: UI edits → YAML file → preview updates
+✅ File save (needs POST /dashboards endpoint - 2h backend work)
+```
+
+**Deliverables**: Full YAML editing workflow, dirty state tracking, save
+
+---
+
+### Sprint 3: Onboarding MVP (Days 11-13)
+```
+✅ Phase 0-MVP: 6-step minimal onboarding
+   - Step 1: Team name
+   - Step 2-3: Skip (use defaults)
+   - Step 4: BigQuery connection test
+   - Step 5: Dataset discovery
+   - Step 6: Table schema preview
+✅ Simplified onboarding store (no PII/docs/policies)
+✅ Single-session completion (no save/resume)
+```
+
+**Deliverables**: Working onboarding, connection validation, catalog browsing
+
+---
+
+### Sprint 4: Lineage + Polish (Days 14-15)
+```
+✅ Phase 7: Lineage graph UI (mock JSON data)
+✅ Accessibility audit (WCAG AA)
+✅ Responsive testing (mobile, tablet, desktop)
+✅ Performance optimization (Lighthouse >90)
+```
+
+**Deliverables**: Lineage visualization, accessibility compliance, polish
+
+---
+
+### Sprint 5: Chat UI Stub (Day 16) ⚠️ STUB ONLY
+```
+⚠️  Chat components with hardcoded mock messages
+⚠️  No real Vercel AI SDK integration
+⚠️  No SSE streaming
+⚠️  UI shell for demo only
+```
+
+**Deliverables**: Chat panel renders, shows mock conversation, demonstrates UX
+
+---
+
 ## Phase 1: Foundation & Setup ✅ COMPLETE
 **Days 1-3 | Completed 2025-10-29**
 
@@ -1356,6 +1845,320 @@ Backend OpenAPI spec → Auto-generates Pydantic (backend) + TypeScript client (
 
 **Deliverables**: 32 files created, ~2,100 lines of code
 **Documentation**: `/docs/frontend_phase1_completion.md`
+
+---
+
+## Phase 1.5: Universal AI SDK Chat Integration 📝 PLANNED
+**Estimated: Days 7-10 | Depends on backend `/chat` and `/sessions` endpoints**
+
+**Purpose**: Integrate Vercel AI SDK for chat UI consuming backend's Universal AI SDK. Frontend acts as pure display layer—backend handles all LLM calls, provider selection, tool execution, session storage (GCS), and cost tracking. This phase establishes foundation for Phase 6 (LLM Chat Assistant features).
+
+### 1.5.1 Vercel AI SDK Setup & Configuration
+**Complexity**: Simple | **Files**: `apps/web/package.json`, `apps/web/lib/api/chat-client.ts`
+
+- [ ] 1.5.1.1 Install dependencies: `pnpm add ai`
+- [ ] 1.5.1.2 Create `lib/api/chat-client.ts` with `useChat()` configuration
+- [ ] 1.5.1.3 Configure SSE endpoint: `api: '/api/v1/chat'` with session ID in body
+- [ ] 1.5.1.4 Add environment variable: `NEXT_PUBLIC_CHAT_API_URL`
+- [ ] 1.5.1.5 Test basic streaming with mock backend response (curl or Postman)
+- [ ] 1.5.1.6 Verify SSE connection establishes correctly (check Network tab DevTools)
+
+**Acceptance Criteria**:
+- `useChat()` hook returns messages, append, isLoading correctly
+- SSE connection visible in DevTools Network tab
+- Messages stream progressively (not all at once)
+
+---
+
+### 1.5.2 Session Store Implementation (Zustand)
+**Complexity**: Medium | **Files**: `apps/web/lib/stores/session-store.ts`, `apps/web/lib/api/session-client.ts`
+
+- [ ] 1.5.2.1 Create Zustand store: `lib/stores/session-store.ts`
+- [ ] 1.5.2.2 Store state: `{ sessionId, user, provider, totalCost, totalTokens, isHydrated }`
+- [ ] 1.5.2.3 Implement `hydrate()` action calling `GET /sessions/current`
+- [ ] 1.5.2.4 Implement `updateCost(cost, tokens)` and `addMessage(message)` actions
+- [ ] 1.5.2.5 Wire up hydration in `app/layout.tsx` (call on mount)
+- [ ] 1.5.2.6 Add loading state during hydration
+- [ ] 1.5.2.7 Handle hydration errors (session expired → redirect to login)
+
+**Acceptance Criteria**:
+- Store hydrates on app mount with current session data from backend
+- Cost/tokens update correctly after simulated message (manual test)
+- Store persists across route changes (memory only, cleared on page close)
+- Hydration errors trigger login redirect
+
+---
+
+### 1.5.3 Chat Interface Components
+**Complexity**: Complex | **Files**: `apps/web/components/assistant/*.tsx`
+
+#### 1.5.3.1 ChatContainer Component
+- [ ] Create `components/assistant/ChatContainer.tsx`
+- [ ] Resizable right panel (320px default, 200-600px range)
+- [ ] Collapsible with toggle button
+- [ ] Header with title "Assistant" and close button
+
+#### 1.5.3.2 MessageList Component
+- [ ] Create `components/assistant/MessageList.tsx`
+- [ ] Virtualized list using `react-window` for >100 messages
+- [ ] Auto-scroll to bottom on new messages
+- [ ] "Jump to latest" button when scrolled up >100px
+- [ ] Loading skeleton while fetching history
+
+#### 1.5.3.3 MessageBubble Component
+- [ ] Create `components/assistant/MessageBubble.tsx`
+- [ ] Role-based styling: user (right-aligned, dark bg), assistant (left-aligned, light grey)
+- [ ] Display timestamp as relative time ("2m ago")
+- [ ] Per-message cost badge (small pill, grey, next to timestamp)
+- [ ] Support inline tool call cards (see 1.5.4)
+
+#### 1.5.3.4 InputArea Component
+- [ ] Create `components/assistant/InputArea.tsx`
+- [ ] Auto-resize textarea (min 40px, max 200px)
+- [ ] Send button (disabled when empty or loading)
+- [ ] Keyboard shortcut: Cmd/Ctrl+Enter to send
+- [ ] Character count display (optional, for token estimation later)
+
+#### 1.5.3.5 Wire Up useChat Hook
+- [ ] Import and initialize `useChat()` in ChatContainer
+- [ ] Pass messages to MessageList
+- [ ] Connect InputArea to `append()` function
+- [ ] Handle loading state (disable input, show typing indicator)
+
+**Acceptance Criteria**:
+- Chat panel opens/closes smoothly
+- Messages render with correct alignment (user right, assistant left)
+- Virtualization works smoothly for >100 messages (test with mock data)
+- Input area auto-resizes and sends messages via `append()`
+- Monotone theme applied throughout (no colors except semantic status)
+
+---
+
+### 1.5.4 Tool Execution Display Components
+**Complexity**: Complex | **Files**: `apps/web/components/assistant/tool/*.tsx`
+
+#### 1.5.4.1 ToolCallCard Component
+- [ ] Create `components/assistant/tool/ToolCallCard.tsx`
+- [ ] Display tool name, collapsed args preview
+- [ ] State machine: `pending` → `executing` → `completed` | `failed`
+- [ ] Pending: greyed out, no interaction
+- [ ] Executing: spinner, "Running..." text
+- [ ] Completed: green checkmark, expandable result panel
+- [ ] Failed: red X, error message
+
+#### 1.5.4.2 ToolResultPanel Component
+- [ ] Create `components/assistant/tool/ToolResultPanel.tsx`
+- [ ] Collapsible panel below ToolCallCard
+- [ ] Syntax-highlighted JSON/code results (use ShadCN CodeBlock or similar)
+- [ ] Copy button for result content
+- [ ] Max height with scroll for large results
+
+#### 1.5.4.3 Integrate with Message Stream
+- [ ] Parse `tool_call` events from SSE stream
+- [ ] Render ToolCallCard inline within assistant MessageBubble
+- [ ] Update card state as `tool_status` events arrive
+- [ ] Expand result panel automatically on completion
+
+**Acceptance Criteria**:
+- Tool call appears inline in assistant message
+- Card transitions correctly through states (pending → executing → completed)
+- Result streams progressively into panel
+- Failed tools show error message clearly
+- No approval UI (backend handles orchestration in MVP)
+
+---
+
+### 1.5.5 Cost & Token Tracking UI
+**Complexity**: Medium | **Files**: `apps/web/components/assistant/CostCounter.tsx`
+
+#### 1.5.5.1 CostCounter Component
+- [ ] Create `components/assistant/CostCounter.tsx`
+- [ ] Read from session store: `totalCost`, `totalTokens`
+- [ ] Display format: "$1.23 • 45.2K tokens"
+- [ ] Position in assistant panel header (top-right)
+- [ ] Color-coded warnings: green (<$1), yellow ($1-5), red (>$5)
+- [ ] Tooltip with breakdown (input tokens, output tokens, cost per message type)
+
+#### 1.5.5.2 Per-Message Cost Badge
+- [ ] Add cost prop to MessageBubble component
+- [ ] Display as small pill next to timestamp: "$0.0023"
+- [ ] Use monotone grey (not semantic color)
+- [ ] Only show if cost > $0
+
+#### 1.5.5.3 Budget Warning Banner
+- [ ] Create `components/assistant/BudgetWarning.tsx`
+- [ ] Trigger at 80% of daily budget (read from session metadata)
+- [ ] Display above input area
+- [ ] Message: "Approaching daily budget ($8/$10). Monitor usage."
+- [ ] Dismissible, but re-appears if cost increases
+
+#### 1.5.5.4 Update Cost on SSE Events
+- [ ] Listen for `cost_update` events in SSE stream
+- [ ] Call `sessionStore.updateCost(cost, tokens)` on event
+- [ ] CostCounter re-renders automatically (Zustand subscription)
+
+**Acceptance Criteria**:
+- Counter updates in real-time as messages complete
+- Cost displayed with 4 decimal places (e.g., $0.0023)
+- Token count shows input/output breakdown in tooltip
+- Warning banner appears at correct threshold (test with mock session over limit)
+- All values from backend—no frontend calculation
+
+---
+
+### 1.5.6 Provider Display (Read-Only)
+**Complexity**: Simple | **Files**: `apps/web/components/assistant/ProviderIndicator.tsx`
+
+- [ ] 1.5.6.1 Create `components/assistant/ProviderIndicator.tsx`
+- [ ] 1.5.6.2 Read `session.provider` from session store
+- [ ] 1.5.6.3 Display in chat header: "Using Claude 3.5 Sonnet"
+- [ ] 1.5.6.4 Monotone styling (grey text, small font)
+- [ ] 1.5.6.5 No selection dropdown (backend chooses provider)
+- [ ] 1.5.6.6 Tooltip: "Provider selected by backend based on task"
+
+**Acceptance Criteria**:
+- Provider name displayed correctly from session metadata
+- Updates when provider changes (edge case, not in MVP)
+- Read-only (no interaction)
+- Tooltip explains backend selection
+
+---
+
+### 1.5.7 Chat Store Implementation (Zustand)
+**Complexity**: Medium | **Files**: `apps/web/lib/stores/chat-store.ts`
+
+- [ ] 1.5.7.1 Create Zustand store: `lib/stores/chat-store.ts`
+- [ ] 1.5.7.2 Store state: `{ messages, pendingTools, optimisticMessages }`
+- [ ] 1.5.7.3 Implement `addOptimisticMessage(content)` (temp ID, user role)
+- [ ] 1.5.7.4 Implement `confirmMessage(tempId, realId)` (replace temp with real from backend)
+- [ ] 1.5.7.5 Implement `addPendingTool(tool)` and `updateToolStatus(id, status)`
+- [ ] 1.5.7.6 Sync with Vercel AI SDK's internal state (messages array)
+
+**Acceptance Criteria**:
+- Optimistic messages appear immediately on send
+- Messages update from temp ID to real ID on backend confirmation
+- Pending tools tracked correctly
+- Store syncs with `useChat()` messages
+
+---
+
+### 1.5.8 Message Caching (TanStack Query)
+**Complexity**: Medium | **Files**: `apps/web/lib/hooks/useMessages.ts`, `apps/web/lib/api/query-client.ts`
+
+- [ ] 1.5.8.1 Add TanStack Query cache for messages
+- [ ] 1.5.8.2 Cache key pattern: `['session', sessionId, 'messages']`
+- [ ] 1.5.8.3 Fetch from `GET /sessions/:id/messages` on mount
+- [ ] 1.5.8.4 Set stale time to Infinity (messages immutable)
+- [ ] 1.5.8.5 Invalidate cache on new SSE message (prevent drift)
+- [ ] 1.5.8.6 Implement optimistic update for new messages (instant UI, rollback on error)
+- [ ] 1.5.8.7 Garbage collect old sessions after 30 minutes
+
+**Acceptance Criteria**:
+- Messages cached and don't refetch unnecessarily
+- Cache hydrates from backend on panel open
+- New messages from SSE invalidate and refresh cache
+- Optimistic updates work (message appears instantly, updates with real data)
+- Old sessions clear from cache after timeout
+
+---
+
+### 1.5.9 Error Handling & Display
+**Complexity**: Medium | **Files**: `apps/web/components/assistant/ErrorBanner.tsx`, `apps/web/lib/errors/chat-errors.ts`
+
+#### 1.5.9.1 Error Banner Component
+- [ ] Create `components/assistant/ErrorBanner.tsx`
+- [ ] Display above input area (red background, white text)
+- [ ] Show error message from backend
+- [ ] "Retry" button if error is retryable (read from backend error metadata)
+- [ ] "Copy error details" button (includes trace ID)
+- [ ] Auto-dismiss after 10 seconds (unless user interacts)
+
+#### 1.5.9.2 Error Handling in useChat
+- [ ] Add `onError` callback to `useChat()` configuration
+- [ ] Parse error response from backend (JSON format)
+- [ ] Display error in ErrorBanner
+- [ ] Log error to console (with trace ID)
+
+#### 1.5.9.3 Network Error Handling
+- [ ] Detect SSE connection drops (EventSource error event)
+- [ ] Show "Reconnecting..." toast
+- [ ] Auto-reconnect with exponential backoff (3 attempts)
+- [ ] On success, resume stream from last message
+
+#### 1.5.9.4 Session Expired Handling
+- [ ] Detect 401 responses
+- [ ] Redirect to login immediately
+- [ ] No draft preservation in MVP (backend is source of truth)
+
+**Acceptance Criteria**:
+- Backend errors display in banner with clear message
+- Retry button works for retryable errors
+- Network errors trigger reconnect logic
+- Session expired redirects to login
+- All error states tested (mock error responses)
+
+---
+
+### 1.5.10 Streaming UX Enhancements
+**Complexity**: Medium | **Files**: Various component updates
+
+- [ ] 1.5.10.1 Add typing indicator while waiting for first token
+- [ ] 1.5.10.2 Progressive text rendering (word-by-word via Vercel SDK)
+- [ ] 1.5.10.3 Tool call cards appear inline during stream
+- [ ] 1.5.10.4 Auto-scroll follows latest message (unless user scrolled manually)
+- [ ] 1.5.10.5 "Stop generation" button while streaming (calls `stop()` from useChat)
+- [ ] 1.5.10.6 Disable input while generating
+- [ ] 1.5.10.7 Smooth transitions between states (pending → typing → complete)
+
+**Acceptance Criteria**:
+- Typing indicator appears immediately on send
+- Text streams smoothly (not janky, ~60 FPS)
+- Tool calls render inline as they arrive
+- Auto-scroll works correctly (doesn't scroll if user has scrolled up)
+- Stop button cancels stream and re-enables input
+
+---
+
+### 1.5.11 Integration Testing (E2E)
+**Complexity**: Complex | **Files**: `apps/web/tests/e2e/chat.spec.ts`
+
+- [ ] 1.5.11.1 E2E test: Open chat → Send message → Verify streaming
+- [ ] 1.5.11.2 E2E test: Send message with tool call → Verify status updates → Verify result displays
+- [ ] 1.5.11.3 E2E test: Trigger backend error → Verify error banner → Retry
+- [ ] 1.5.11.4 E2E test: Send 5 messages → Verify cost increments correctly
+- [ ] 1.5.11.5 E2E test: Session recovery → Disconnect network → Reconnect → Verify messages persist
+- [ ] 1.5.11.6 E2E test: Cost warning banner → Mock session over 80% budget → Verify banner appears
+- [ ] 1.5.11.7 E2E test: Provider display → Verify correct provider shown from backend
+
+**Acceptance Criteria**:
+- All E2E tests pass in Playwright
+- Chat interaction completes end-to-end with real backend
+- Tool execution flow works without errors
+- Error states render correctly
+- Cost tracking accurate (matches backend session endpoint response)
+- Tests run in CI pipeline
+
+---
+
+**Phase 1.5 Deliverables**:
+- Vercel AI SDK integrated and streaming from backend `/chat`
+- Session store hydrating from `/sessions/current`
+- Chat UI components (MessageList, MessageBubble, InputArea, ToolCallCard, CostCounter)
+- Message caching via TanStack Query
+- Error handling for network, backend errors, session expiry
+- E2E tests covering happy path and error scenarios
+
+**Phase 1.5 Blockers**:
+- Backend `/chat` endpoint must support SSE streaming
+- Backend `/sessions/current` and `/sessions/:id/messages` endpoints functional
+- Backend must emit `cost_update` and `tool_call` events in SSE stream
+
+**Phase 1.5 Success Criteria**:
+- User can send message and see progressive streaming response
+- Tool calls display with correct status (pending → executing → completed)
+- Cost counter updates in real-time
+- Session persists across route changes
+- All E2E tests green
 
 ---
 
@@ -1611,54 +2414,169 @@ Backend OpenAPI spec → Auto-generates Pydantic (backend) + TypeScript client (
 
 ---
 
-## Phase 6: LLM Chat Assistant
-**Days 21-23**
+## Phase 6: LLM Chat Assistant (Enhanced Features)
+**Days 21-23 | Depends on Phase 1.5 completion**
 
-### 6.1 Chat UI Components
-- [ ] 6.1.1 ChatMessage component (user/assistant message bubbles)
-- [ ] 6.1.2 ChatInput with auto-resize textarea
-- [ ] 6.1.3 ChatHistory container (virtualized list for performance)
-- [ ] 6.1.4 ExamplePrompts component (clickable prompt suggestions)
-- [ ] 6.1.5 ChatProgress indicator (typing animation, "Generating SQL...")
-- [ ] 6.1.6 DashboardPreviewCard (inline preview in chat)
-- [ ] 6.1.7 CodeBlock component (syntax-highlighted SQL preview)
-- [ ] 6.1.8 "Apply Changes" button in assistant messages
-- [ ] 6.1.9 Thumbs up/down feedback buttons
+**Note**: Core chat UI (MessageBubble, InputArea, streaming, cost tracking) implemented in Phase 1.5. This phase adds LLM-specific features: dashboard creation, iterative refinement, SQL verification display, "Explain this" functionality.
 
-### 6.2 Chat State & Backend Integration
-- [ ] 6.2.1 Assistant Zustand store (messages, conversation ID, loading state)
-- [ ] 6.2.2 useChat hook with Server-Sent Events (SSE) for streaming
-- [ ] 6.2.3 SSE streaming handler (incremental message updates)
-- [ ] 6.2.4 POST /v1/chat/message endpoint integration
-- [ ] 6.2.5 POST /v1/chat/create-dashboard workflow
-- [ ] 6.2.6 Error handling for LLM failures (timeout, quota, validation)
-- [ ] 6.2.7 Retry logic for failed LLM requests
+### 6.1 Dashboard-Specific Chat Components
+**Complexity**: Medium | **Files**: `apps/web/components/assistant/dashboard/*.tsx`
 
-### 6.3 Dashboard Creation Flow
-- [ ] 6.3.1 "New Dashboard" modal with chat interface
-- [ ] 6.3.2 User prompt submission (natural language description)
-- [ ] 6.3.3 LLM YAML generation display
-- [ ] 6.3.4 SQL verification loop (backend executes, returns sample + metadata)
+- [ ] 6.1.1 ExamplePrompts component (clickable dashboard creation suggestions)
+  - Examples: "Show revenue by region", "Track daily signups", "Monitor API latency"
+  - Positioned below input area when chat empty
+  - Monotone styling (grey cards, hover effect)
+- [ ] 6.1.2 DashboardPreviewCard (inline preview in chat)
+  - Mini version of dashboard with live charts
+  - Rendered within assistant message bubble
+  - Click to expand full-size preview
+  - "Apply Changes" and "Save Dashboard" buttons
+- [ ] 6.1.3 CodeBlock component (syntax-highlighted SQL preview)
+  - Shows generated SQL queries
+  - Copy button, expand/collapse for long queries
+  - Integrated with verification metadata display
+- [ ] 6.1.4 VerificationPanel component (shows SQL execution results)
+  - Display: schema, row count, bytes scanned, sample rows (max 10)
+  - Positioned below SQL code block
+  - Color-coded status: green (verified), yellow (warning), red (failed)
+- [ ] 6.1.5 Thumbs up/down feedback buttons on assistant messages
+  - Send feedback to backend for LLM improvement
+  - Collect optional text feedback on thumbs down
+
+**Acceptance Criteria**:
+- Example prompts clickable and populate input
+- Dashboard preview renders live charts with backend data
+- SQL preview shows all queries with syntax highlighting
+- Verification panel displays execution metadata correctly
+
+---
+
+### 6.2 Backend Integration (Enhanced)
+**Complexity**: Medium | **Files**: Updates to existing chat-client.ts
+
+**Note**: Phase 1.5 established `/chat` SSE connection. This phase adds dashboard-specific message types and workflows.
+
+- [ ] 6.2.1 Extend SSE event handling for dashboard creation events
+  - `yaml_generated`: Backend sends YAML definition
+  - `sql_verified`: Backend sends verification results (schema, sample, bytes)
+  - `dashboard_preview_ready`: Signal frontend to render preview
+- [ ] 6.2.2 POST /v1/chat/create-dashboard workflow
+  - Send: user prompt + optional context (existing dashboard to modify)
+  - Receive: SSE stream with YAML, verification, preview data
+  - Parse YAML into in-memory dashboard model
+- [ ] 6.2.3 Iterative refinement handling
+  - User sends follow-up: "Make bars red" or "Add filter for date"
+  - Backend updates YAML incrementally
+  - Frontend re-renders preview with updated YAML
+- [ ] 6.2.4 Error handling for LLM failures specific to dashboards
+  - SQL verification failed: Show error, offer to retry with adjusted query
+  - YAML invalid: Show validation errors, suggest fixes
+  - BigQuery quota exceeded: Suggest reducing query scope
+
+**Acceptance Criteria**:
+- Dashboard creation workflow streams YAML + verification progressively
+- Iterative refinement updates preview without full regeneration
+- SQL verification errors show actionable remediation steps
+- All errors handled gracefully (no crashes)
+
+### 6.3 Dashboard Creation Flow (E2E UX)
+**Complexity**: Complex | **Files**: `apps/web/app/new/page.tsx`, workflow orchestration
+
+- [ ] 6.3.1 "New Dashboard" button in gallery → Opens `/new` page with chat interface
+  - Full-screen chat layout (no dashboard preview initially)
+  - Welcome message: "Describe the dashboard you'd like to create"
+  - Example prompts displayed (6.1.1)
+- [ ] 6.3.2 User prompt submission workflow
+  - User types natural language description (e.g., "Show top products by revenue")
+  - Frontend sends via `useChat().append()` to backend
+  - Backend Universal AI SDK generates YAML via LLM
+- [ ] 6.3.3 YAML generation display (progressive)
+  - Assistant message shows "Generating dashboard..."
+  - YAML appears progressively as SSE streams (6.2.1)
+  - CodeBlock component displays YAML with syntax highlighting
+- [ ] 6.3.4 SQL verification loop display
+  - Backend executes SQL queries automatically
+  - VerificationPanel shows results for each query (6.1.4)
+  - Display: schema, row count, bytes scanned, sample rows (max 10)
+  - Color-coded status per query (green verified, red failed)
 - [ ] 6.3.5 Preview rendering from generated YAML
-- [ ] 6.3.6 Iterative refinement ("Can you add X?", "Change color to Y")
-- [ ] 6.3.7 "Save Dashboard" button (finalizes and persists)
+  - DashboardPreviewCard appears in chat (6.1.2)
+  - Renders live charts with real data from backend
+  - User sees full dashboard inline without leaving chat
+- [ ] 6.3.6 Iterative refinement workflow
+  - User sends follow-up: "Make bars red" or "Add date filter"
+  - Backend updates YAML incrementally (not full regeneration)
+  - Preview updates in real-time with new YAML
+  - Chat history shows full conversation context
+- [ ] 6.3.7 "Save Dashboard" button in preview card
+  - Opens dialog: name, description (optional), tags
+  - Submits to backend: `POST /v1/dashboards`
+  - Backend persists YAML, returns slug
+  - Frontend shows success toast with "View Dashboard" button
 - [ ] 6.3.8 Redirect to /dash/[slug] after save
-- [ ] 6.3.9 Display verification payload (schema, sample rows, bytes scanned) before user accepts _(Notes: Mirrors backend verification loop feedback in PDR §8)_
+  - Automatic redirect after 2 seconds
+  - Or user clicks "View Dashboard" immediately
+  - Dashboard loads with all charts functional
 
-### 6.4 "Explain This" Feature
-- [ ] 6.4.1 "Explain this" button in chart kebab menus
-- [ ] 6.4.2 Context pre-filling (chart SQL, table schema, dashboard metadata)
-- [ ] 6.4.3 Assistant panel opens with context message
+**Acceptance Criteria**:
+- Full dashboard creation workflow completes without leaving chat
+- YAML streams progressively with verification results
+- Preview renders with live data (not mock)
+- Iterative refinement updates preview correctly
+- Save workflow persists dashboard and redirects successfully
+
+---
+
+### 6.4 "Explain This" Feature (Contextual AI Help)
+**Complexity**: Medium | **Files**: Chart kebab menu integration, context building
+
+- [ ] 6.4.1 "Explain this" button in chart kebab menus (⋮)
+  - Positioned in chart header dropdown
+  - Icon: question mark or lightbulb (monotone)
+- [ ] 6.4.2 Context pre-filling logic
+  - Gather: chart SQL, YAML definition, table schema, verification metadata
+  - Include: bytes scanned, freshness timestamp, row count
+  - Format as structured JSON for backend
+- [ ] 6.4.3 Assistant panel auto-opens with context
+  - If collapsed, panel expands automatically
+  - Context message appears: "I've loaded the details for [Chart Name]. What would you like to know?"
+  - User can immediately ask follow-up questions
 - [ ] 6.4.4 LLM explains query logic in natural language
-- [ ] 6.4.5 Include verification + freshness metadata in context payload _(Notes: Ensure assistant has bytes_scanned, as-of timestamp per UI PDR)_
+  - Backend LLM receives context + user question
+  - Responds with plain English explanation
+  - Examples: "This query counts unique users who logged in during the last 30 days, grouped by region."
+- [ ] 6.4.5 Follow-up questions supported
+  - User asks: "Why is the count different from last month?"
+  - LLM has full context, can provide specific answer
+  - Chat history persists context across session
 
-**Phase 6 Acceptance Criteria**:
-- Can create dashboard via natural language chat
-- LLM generates valid YAML with verified SQL
-- Preview shows dashboard with real data
-- Iterative refinement works (user requests changes)
-- "Explain this" feature provides context to LLM
-- Error messages actionable when LLM fails
+**Acceptance Criteria**:
+- "Explain this" button opens assistant with chart context loaded
+- LLM provides accurate natural language explanation of SQL
+- Follow-up questions work correctly (context retained)
+- Verification metadata included in explanations (e.g., "This query scanned 1.2 GB")
+
+---
+
+**Phase 6 Deliverables**:
+- Dashboard-specific chat components (ExamplePrompts, DashboardPreviewCard, VerificationPanel)
+- Full dashboard creation workflow from prompt to saved dashboard
+- Iterative refinement with live preview updates
+- "Explain this" contextual help for charts
+- SQL verification display with sample data
+
+**Phase 6 Dependencies**:
+- Phase 1.5 completed (chat UI, streaming, session management)
+- Backend `/chat/create-dashboard` endpoint functional
+- Backend SQL verification API returns schema + sample + metadata
+- Backend supports incremental YAML updates for refinement
+
+**Phase 6 Success Criteria**:
+- User can create dashboard entirely through natural language (no YAML editing)
+- Preview shows live data, not mocks
+- Iterative refinement updates preview correctly (3+ rounds tested)
+- "Explain this" feature provides accurate, helpful explanations
+- All workflows tested E2E with real backend
 
 ---
 

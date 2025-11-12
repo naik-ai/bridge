@@ -41,22 +41,25 @@ Users need intuitive visual dashboards but lack SQL expertise. Current processes
 
 ### **3. Architecture Overview**
 
-**Framework and Routing**  
+**Framework and Routing**
 Next.js App Router provides foundation. Server components handle authentication and initial data fetching. Client components manage interactive state. File-based routing: dashboard view, edit mode, new dashboard wizard, settings. Middleware validates session on protected routes.
 
-**Component Architecture**  
+**Component Architecture**
 Top-level App Shell wraps all views. Explorer sidebar lists available dashboards and datasets. Workspace tabs hold active dashboard views and editors. Assistant panel contains LLM chat interface with collapsible sections. All components built with ShadCN/UI primitives for consistency.
 
-**State Management**  
-React Context or Zustand stores: current user session, active dashboard YAML model, dirty flag, last save timestamp, assistant conversation history. No persistence beyond session for MVP. Changes held in memory until explicit save triggers backend API call.
+**AI Integration Layer**
+Frontend acts as pure display layer for backend's Universal AI SDK. Vercel AI SDK (`ai` package) handles streaming UX via `useChat()` hook consuming backend `/chat` SSE endpoint. Backend orchestrates all LLM calls (Claude, OpenAI, Gemini, Bedrock), provider selection, tool execution, and cost tracking. Frontend receives streamed responses and displays progressively. No direct provider integrations in frontend—all AI logic remains server-side. Tool execution status (pending, executing, completed) streamed from backend and rendered in UI. Cost and token metadata calculated by backend, displayed in real-time via session API.
 
-**Data Flow**  
-Server-side rendering fetches dashboard metadata on route load. Client components request chart data from backend API. Responses cached in React Query for efficient re-renders. UI mutations update in-memory YAML model. Save action posts YAML to backend, receives confirmation, resets dirty flag.
+**State Management**
+Zustand stores organized by domain: **Session Store** (current session metadata: ID, user, provider, total cost, total tokens), **Chat Store** (optimistic message updates, pending tool approvals), **Dashboard Store** (active YAML model, dirty flag, last save timestamp). Session store hydrates once on app mount from `/sessions/current` endpoint. Chat messages cached via TanStack Query for history viewing. No persistence beyond session for MVP—backend GCS storage is source of truth. Changes held in memory until explicit save triggers backend API call.
 
-**Styling System**  
+**Data Flow**
+Server-side rendering fetches dashboard metadata on route load. Client components request chart data from backend API. Responses cached in React Query for efficient re-renders. Chat messages stream via SSE from backend `/chat` endpoint, handled by Vercel AI SDK. UI mutations update in-memory YAML model. Save action posts YAML to backend, receives confirmation, resets dirty flag. Session cost/tokens update automatically as messages complete.
+
+**Styling System**
 Tailwind CSS provides utility-first styling. ShadCN components offer pre-built accessible patterns. Design tokens define spacing, colors, typography following minimal aesthetic. Light and dark modes supported via CSS variables. Custom theme variations possible without component changes.
 
-**Chart Rendering**  
+**Chart Rendering**
 Recharts library renders all visualizations. Data arrives as arrays from backend. Chart configurations derived from YAML metadata: chart type, axes, colors, legend placement. Responsive containers handle window resizing. Loading skeletons show during fetch. Error boundaries catch rendering failures gracefully.
 
 ### **4. Data & Control Flows**
@@ -64,8 +67,11 @@ Recharts library renders all visualizations. Data arrives as arrays from backend
 **Dashboard View Load Flow**  
 User navigates to dashboard URL with slug identifier. Next.js middleware validates session cookie. Server component fetches dashboard metadata from backend API. Server pre-renders layout structure. Client component hydrates and requests chart data via GET data endpoint. Backend returns compact payloads with as-of timestamps. Client renders charts using Recharts with data props. Freshness badges display timestamps. User interacts with charts: zoom, hover for tooltips, legend toggles.
 
-**LLM-Assisted Dashboard Creation Flow**  
-User clicks "New Dashboard" button. Frontend shows chat interface with example prompts. User types natural language request describing desired visualization. Frontend sends prompt to backend orchestration endpoint. Backend coordinates LLM agent which generates YAML. Backend verifies SQL queries through execution loop. Backend returns YAML to frontend. Frontend parses YAML into in-memory model. Renderer engine transforms model into React component tree. UI displays charts with real data. User reviews and optionally requests modifications through chat. Final edit triggers save action.
+**LLM-Assisted Dashboard Creation Flow**
+User clicks "New Dashboard" button. Frontend shows chat interface with example prompts. User types natural language request describing desired visualization. Frontend sends message via Vercel AI SDK `useChat()` hook to backend `/chat` endpoint with current session ID. Backend Universal AI SDK coordinates LLM (Claude/OpenAI/Gemini) which generates YAML. Backend verifies SQL queries through execution loop. Backend streams response via SSE including YAML, verification results, and sample data. Frontend progressively renders streamed chunks. Frontend parses YAML into in-memory model and displays preview. User reviews and optionally requests modifications through continued chat. Backend updates session cost/tokens after each LLM call. Final edit triggers save action posting to backend.
+
+**Chat Message Streaming Flow**
+User types message in assistant panel input. Frontend calls `useChat().append()` with message content and session ID. Backend receives `POST /chat` request, validates session, invokes Universal AI SDK. Backend streams SSE events: `text` chunks (progressive message content), `tool_call` events (tool name, args, status), `cost_update` events (tokens used, cost incurred). Frontend `useChat()` hook processes stream, updates message list in real-time. Tool calls render as inline cards with status (pending → executing → completed). Cost counter updates immediately on `cost_update` events. Errors streamed as `error` events, displayed in error banner. On completion, backend persists full conversation to GCS, frontend caches message in TanStack Query.
 
 **Two-Way Edit Flow**  
 User viewing rendered dashboard clicks "Edit" button. UI toggles to edit mode showing properties panel. User changes chart color via color picker. Frontend updates in-memory YAML model at specific path. Renderer re-evaluates model and updates chart instantly. Dirty flag sets to true, UI shows unsaved indicator. User clicks "Save" button. Frontend validates YAML structure locally. Frontend posts to backend save endpoint with YAML payload. Backend writes to storage and returns confirmation. Frontend resets dirty flag, shows success toast, updates last save timestamp.
@@ -121,8 +127,34 @@ Frontend consumes lineage graph JSON from backend. Renders using D3.js or Cytosc
 **Performance Monitoring**  
 Browser DevTools Lighthouse audits run in CI pipeline. Performance budget enforced: Time to Interactive under 3 seconds, Total Blocking Time under 300ms. Bundle size monitored: main bundle under 200KB gzipped. Failed budgets block deployment to production.
 
-**Logging**  
+**Logging**
 Client-side errors sent to backend logging endpoint with user context and browser info. Logs include: error message, stack trace, user action preceding error, dashboard slug if relevant. PII scrubbed before transmission. Excessive error rates trigger alerts for on-call team.
+
+### **7.1 Chat UI Components & Patterns**
+
+**Assistant Panel Architecture**
+Right-side collapsible panel (320px width, resizable). Contains chat interface powered by Vercel AI SDK. Components: ChatContainer (wrapper), MessageList (virtualized with react-window for >100 messages), MessageBubble (role-based styling), InputArea (auto-resize textarea with send button), CostCounter (header display), ProviderIndicator (shows current LLM in use).
+
+**Message Display Patterns**
+User messages right-aligned with dark background (`bg-black` light mode, `bg-white` dark mode). Assistant messages left-aligned with light grey (`bg-tertiary`). Timestamps displayed as relative time ("2m ago") in `text-tertiary`. Per-message cost badge shows as small pill next to timestamp (e.g., "$0.0023"). Tool calls render as indented cards within assistant message bubble showing tool name, collapsed args preview, and execution status.
+
+**Tool Execution UI**
+ToolCallCard component displays tool invocations inline. States: `pending` (greyed out, no interaction), `executing` (spinner, "Running..." text), `completed` (green checkmark, expandable result panel), `failed` (red X, error message). ToolResultPanel renders below card when expanded, uses syntax highlighting for JSON/code results. All tool orchestration handled by backend—frontend purely displays status updates received via SSE stream.
+
+**Cost & Token Display**
+CostCounter fixed in assistant panel header showing cumulative session totals: "$1.23 • 45.2K tokens". Updates in real-time as `cost_update` events arrive via SSE. Color-coded warnings: green (<$1), yellow ($1-5), red (>$5). Per-message badges show individual message cost. No frontend cost calculation—all values from backend session metadata.
+
+**Provider Display**
+Read-only indicator in chat header shows current LLM provider selected by backend: "Using Claude 3.5 Sonnet". No provider selection UI in MVP—backend Universal AI SDK chooses provider based on task, cost, availability. Future: admin users can override provider preference via settings.
+
+**Streaming UX**
+Progressive text rendering as SSE chunks arrive (word-by-word via Vercel SDK default). Typing indicator ("...") while waiting for first token. Tool call cards appear inline as `tool_call` events stream. Scroll automatically follows latest message unless user has scrolled up manually. "Jump to latest" button appears when user scrolls >100px from bottom.
+
+**Error States**
+Network errors show reconnecting toast with countdown. Backend errors display in error banner above input: red background, error message from backend, "Retry" button if retryable. Non-retryable errors show "Copy error details" button including trace ID. Session expired redirects to login immediately.
+
+**Message Caching**
+TanStack Query caches messages with key pattern `['session', sessionId, 'messages']`. Stale time set to Infinity (messages immutable once sent). Cache hydrated from `GET /sessions/:id/messages` on panel open. New messages from SSE invalidate cache and trigger re-fetch to ensure consistency with backend GCS storage. Garbage collection after 30 minutes inactive.
 
 ### **8. User Journeys**
 
@@ -232,22 +264,27 @@ Custom chart types beyond Recharts standard library: heatmaps, Sankey diagrams, 
 | Area | Status | Task Reference | Notes |
 |------|--------|----------------|-------|
 | Phase 1 – Foundation & Setup | ✅ Complete | docs/task.md (Frontend Phase 1.1-1.3) | Monorepo, pnpm workspaces, Tailwind/ShadCN baseline landed; matches current dev workflow. |
+| Phase 1.5 – Universal AI SDK Integration | 📝 Planned | docs/task.md (Frontend Phase 1.5.1-1.5.11) | Vercel AI SDK chat UI, session management, tool display, cost tracking. Depends on backend `/chat` and `/sessions` endpoints. Critical for LLM-assisted dashboard creation. |
 | Phase 2 – OpenAPI Client & Auth | ✅ Complete | docs/task.md (Frontend Phase 2.1-2.4) | Generated TypeScript client + Google SSO shell finished 2025-10-29; enables authenticated data fetches. |
 | Phase 3.1 – Chart Components | ✅ Complete | docs/task.md (Frontend Phase 3.1) | Core chart primitives (Line/Bar/Area/Table/KPI) implemented with monotone theme + skeletons. |
 | Phase 3.2 – Dashboard Widgets | 🚧 In Progress | docs/task.md (Frontend Phase 3.2) | Layout + freshness + operational auto-refresh outstanding; ties directly to Analytical/Operational/Strategic view UX. |
 | Phase 4 – Dashboard Pages & Data Hooks | 🚧 In Progress | docs/task.md (Frontend Phase 4.1-4.3) | Hooks + gallery/view wiring pending; required before E2E smoke flows pass. |
 | Phase 8.1 – Datasets Explorer (Schema Browser UI) | 📝 Planned | docs/task.md (Frontend Phase 8.1) | UX spec ready (lazy tree, virtual scroll, preview panel); waiting on hooks + schema API wiring. |
-| Editor & Chat Enhancements (Phases 5-6) | 📝 Planned | docs/task.md (Frontend Phases 5-6) | Builder/YAML tabs, autosave, chat workflows queued after core dashboard pages stabilize. |
+| Editor & Chat Enhancements (Phase 5) | 📝 Planned | docs/task.md (Frontend Phase 5) | Builder/YAML tabs, autosave workflows queued after core dashboard pages stabilize. |
+| Phase 6 – LLM Chat (Enhanced) | 📝 Planned | docs/task.md (Frontend Phase 6.1-6.4) | Builds on Phase 1.5; adds dashboard creation flow, iterative refinement, "Explain this" feature. Requires Phase 1.5 completion. |
 
 **Outstanding follow-ups**
 - Complete Phase 3.2 operational behaviours (auto-refresh cadence, alert banner) to satisfy UI PDR operational requirements.
 - Ship TanStack Query hooks + gallery/view integration before layering editor/chat features.
+- Implement Phase 1.5 (Universal AI SDK) before starting Phase 6 (LLM Chat) to avoid rework.
 - Ensure schema browser UI consumes `/v1/schema/*` endpoints once available; reuse caching guidance from backend PDR §12.3.
 
 ### **12.2 Decision Log (Updated)**
 - Adopted `@peter/api-client` generated from backend OpenAPI (docs/task.md Phase 2.1) to guarantee type parity between tiers.
 - Sticking with Next.js App Router + React Server Components for authenticated routing; enables server-side session validation before data fetch.
+- **Frontend as Pure Display Layer for AI**: Backend Universal AI SDK handles all LLM calls, provider selection, tool execution, and cost tracking. Frontend uses Vercel AI SDK (`ai` package) solely for streaming UX via `useChat()` hook. No direct LLM provider SDKs in frontend. All session/message storage in backend GCS, frontend hydrates from API.
 - Schema Browser UI will lazy-load datasets/tables with virtual scrolling to keep DOM footprint low, aligning with zero-cost backend plan.
+- **Multi-Store State Pattern**: Zustand stores split by domain (Session, Chat, Dashboard) to prevent state conflicts and enable independent hydration/invalidation cycles.
 
 ### **12.3 Schema Browser UI Snapshot**
 - Left-rail tree lazily loads datasets → tables; leverages virtualized list for large inventories.

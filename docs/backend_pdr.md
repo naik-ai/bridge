@@ -1,13 +1,31 @@
 # **Dashboard Platform — Product Design Reviews**
 
-**Name**: Peter (after Peter Lynch)  
-**Version**: 1.0 MVP  
-**Date**: 2025-10-30  
-**Owner**: Jay (Architect)  
+**Name**: Peter (after Peter Lynch)
+**Version**: 2.0 (Realigned with Universal AI SDK Architecture)
+**Date**: 2025-11-03
+**Owner**: Jay (Architect)
+
+**📋 Implementation Tasks**: See `/docs/backend_tasks.md` for detailed, metadata-oriented task breakdown with dependencies and acceptance criteria.
 
 ---
 
 ## **PDR — Backend (MVP)**
+
+### **⚠️ Reorganization Notice (2025-11-03)**
+
+This PDR has been realigned per `/docs/system_alignment.md` to enforce:
+1. **Postgres as Directory, GCS as Data Lake** - All long-form content (messages, YAML, artifacts) stored in GCS; Postgres stores pointers only
+2. **Dashboard Generation via Chat is MVP Priority** - Universal AI SDK → Chat API → Dashboard YAML Generation → Data Serving
+3. **No Artifact Generation on the Fly (MVP)** - Defer doc crawl, PII, glossary, governance to post-MVP Phase X
+4. **Cost Guardrails Before Heavy Jobs** - Byte caps, rate limits, circuit breakers enforced before enabling background jobs
+
+**Key Changes**:
+- **Phase 0** trimmed from 17 tables → 4 tables (Team, Connection, Dataset, Table)
+- **Phase 3.5** added: Dashboard YAML Generation via LLM (MVP blocker)
+- **Phase X** created: Advanced Onboarding (doc crawl, PII, glossary) deferred to post-MVP
+- See `/docs/task_reorganization_plan.md` for rationale and migration details
+
+---
 
 ### **1. Problem & Goals (MVP)**
 
@@ -67,6 +85,112 @@ Secret Manager holds BigQuery service account keys, database credentials, OAuth 
 **Component Interactions**
 Frontend requests flow to API service. API service authenticates via session token lookup in Postgres. Dashboard content requests check cache first, fall back to BigQuery execution. SQL verification requests execute immediately on BigQuery with guardrails. Save operations write YAML to storage (single write, no DB sync needed). Lineage queries read from Postgres graph tables built from YAML during compile phase.
 
+### **3.1 Universal AI SDK Architecture**
+
+The backend includes a **Universal AI SDK** layer that provides a consistent interface for multi-provider LLM interactions. This is the core orchestrator for all agent-based features and chat-driven dashboard creation.
+
+**Key Components**
+
+**1. Abstract Orchestrator Interface** (`src/ai_sdk/orchestrator.py`)
+
+Base class defining standard methods for LLM interactions:
+- `create_session(user_id, model, tools) -> Session`: Initialize new chat session
+- `send_message(session_id, content) -> AsyncGenerator`: Send message and stream response
+- `execute_tool(tool_name, args) -> ToolResult`: Execute tool with deterministic caching
+- `cache_prompt(block_name, content, cache_control)`: Register reusable prompt blocks
+- Provider-agnostic types: `Session`, `Message`, `Artifact`, `ToolCall`, `PromptBlock`
+- Async-first API with type safety throughout
+
+**2. Provider Adapters** (`src/ai_sdk/providers/`)
+
+Wrap provider-specific SDKs with universal interface:
+- `ClaudeAgentAdapter`: Wraps Anthropic Claude SDK with Computer Use and Prompt Caching extensions
+- `OpenAIAdapter`: Future integration with OpenAI Assistants API (planned)
+- `GoogleAdapter`: Future integration with Google Vertex AI Agent Builder (planned)
+- Each adapter translates universal types to provider-specific formats
+- Handles provider-specific features (e.g., Anthropic cache-control headers)
+
+**3. Session Management** (`src/ai_sdk/session.py`)
+
+GCS-backed session storage with Postgres pointers:
+- **Session Manifest**: JSON document in GCS with metadata and message log pointers
+- **GCS Layout**:
+  - `gs://bridge-sessions/{session_id}/manifest.json` → session metadata
+  - `gs://bridge-sessions/{session_id}/messages-{chunk}.jsonl` → JSONL message logs
+  - `gs://bridge-sessions/{session_id}/artifacts/{sha256}.bin` → deduplicated artifacts
+- **Postgres Pointers**: `sessions` table stores only `session_id`, `user_id`, `gcs_path`, `status`, timestamps
+- **No full message content in Postgres** → keeps DB lean, scales to long conversations
+
+**4. Prompt Registry** (`src/ai_sdk/prompts.py`)
+
+Centralized registry of reusable prompt blocks with cache-control metadata:
+- Supports Anthropic cache-control directives (`ephemeral` for 5-minute cache, `static` for 24-hour cache)
+- Versioned prompts with SHA-based cache key generation
+- Example blocks: `system_prompt_dashboard_creation`, `context_budget_policy`, `safety_guardrails`
+- Blocks loaded from `prompt_blocks` table at runtime
+- Cache-control headers injected automatically for Anthropic provider
+
+**5. Tool Orchestration** (`src/ai_sdk/tools.py`)
+
+Tool execution with deterministic caching:
+- Tool cache layer with key generation: `tool:{tool_name}:{args_hash}`
+- Args hash computed via SHA-256 of canonicalized JSON (sorted keys)
+- Cache stored in `tool_cache` table (metadata) + GCS (payload)
+- Tool execution tracking in `tool_calls` table: session_id, tool_name, args, result, cached, duration_ms
+- Result validation and type conversion
+- TTL varies by tool type: short-lived (1 min) vs stable (24 hours)
+
+**6. Cost Tracking** (`src/ai_sdk/metrics.py`)
+
+Per-call token counting and cost calculation:
+- Token counting: `input_tokens`, `output_tokens`, `cached_input_tokens` (from provider response)
+- Cost calculation based on provider pricing tables:
+  ```python
+  # Example: Anthropic Claude Sonnet 4.5
+  cost_usd = (
+      (input_tokens - cached_input_tokens) * 0.003 / 1000 +  # Input @ $0.003/1K
+      cached_input_tokens * 0.0003 / 1000 +                   # Cached input @ 90% discount
+      output_tokens * 0.015 / 1000                            # Output @ $0.015/1K
+  )
+  ```
+- Aggregation: per-session, per-user, per-model, per-time-window
+- Budget enforcement: reject requests exceeding monthly budget threshold
+
+**Storage Pattern**
+
+```
+GCS Bucket: gs://bridge-sessions/
+├── {session_id}/
+│   ├── manifest.json          # Session metadata + message pointers
+│   ├── messages/
+│   │   ├── messages-0001.jsonl    # JSONL append-only log (chunk 1)
+│   │   └── messages-0002.jsonl    # JSONL append-only log (chunk 2)
+│   └── artifacts/
+│       ├── {sha256_1}.bin     # Deduplicated binary artifacts
+│       └── {sha256_2}.bin
+
+Postgres Tables:
+- sessions: Pointers to GCS manifests (NOT full content)
+  → Fields: session_id, user_id, gcs_path, provider, model, total_tokens, total_cost_usd, status
+- model_calls: Log of all LLM API calls
+  → Fields: session_id, provider, model, input_tokens, output_tokens, cached_input_tokens, cost_usd, latency_ms
+- artifacts: Index with SHA for deduplication
+  → Fields: session_id, content_sha256, gcs_uri, size_bytes, mime_type
+- tool_cache: Deterministic cache for tool execution results
+  → Fields: tool_name, cache_key, gcs_payload_uri, ttl_seconds, expires_at, hit_count
+- prompt_blocks: Registry of reusable prompts with cache metadata
+  → Fields: block_name, content, cache_control_type, version
+```
+
+**Why This Architecture?**
+
+1. **GCS = Data Lake**: Cheap, durable storage for long conversations and large artifacts
+2. **Postgres = Directory**: Fast metadata queries, no bloat from message content
+3. **Provider Independence**: Easy to switch between Claude, GPT-4, Gemini without frontend changes
+4. **Cost Optimization**: Anthropic prompt caching reduces costs by 90% on repeated context
+5. **Deterministic Tool Caching**: Avoid redundant expensive operations (BigQuery queries, API calls)
+6. **Scalability**: Sessions can grow to 1000+ messages without Postgres performance impact
+
 ### **4. Data & Control Flows**
 
 **Dashboard Authoring Flow (LLM-Assisted)**
@@ -78,25 +202,418 @@ Agent generates SQL statement. API wraps in execution context: sets query cache 
 **Dashboard Data Serving Flow**
 Frontend requests dashboard via slug identifier. API checks session validity, loads YAML directly from filesystem (no DB query needed). API determines if cache contains fresh results using key pattern. On cache hit: serialize and return immediately. On cache miss: compile YAML to execution plan, execute queries in parallel on BigQuery, transform results to compact chart payloads, store in cache with version marker, return to frontend. Frontend receives object keyed by chart identifiers containing only necessary data points.
 
-**Precompute Flow**  
+**Precompute Flow**
 Operator or script invokes precompute endpoint with dashboard slug. API loads dashboard YAML, compiles queries, executes all queries on BigQuery in parallel. API transforms each result to chart payload format, stores in cache with fresh version identifier. API updates dashboard metadata with new as-of timestamp. Subsequent frontend requests hit warm cache until TTL expires or manual invalidation.
+
+### **4.1 Session Manifest Flow (Universal AI SDK)**
+
+The **Session Manifest** is the core data structure for LLM interactions. It lives in GCS with Postgres pointers, enabling scalable multi-turn conversations.
+
+**Flow: Create Session**
+
+```
+┌─────────────┐
+│   User      │
+│ (Chat UI)   │
+└──────┬──────┘
+       │ 1. Start new chat
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│  POST /api/v1/sessions                                      │
+│  ├─> SessionService.create_session(user_id, model, tools)   │
+│  │   ├─> Generate session_id (UUID)                         │
+│  │   ├─> Create GCS manifest:                               │
+│  │   │   gs://bridge-sessions/{session_id}/manifest.json    │
+│  │   │   {                                                   │
+│  │   │     session_id, user_id, model, tools,               │
+│  │   │     messages_uri: "gs://.../messages-0001.jsonl",    │
+│  │   │     artifacts: [],                                   │
+│  │   │     metadata: {created_at, updated_at}               │
+│  │   │   }                                                   │
+│  │   ├─> Insert pointer in Postgres:                        │
+│  │   │   sessions(session_id, user_id, gcs_path, status)    │
+│  │   └─> Return session_id                                  │
+│  └─> Response: {session_id, gcs_path, provider, model}      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Flow: Send Message**
+
+```
+┌─────────────┐
+│   User      │
+│ (Chat UI)   │
+└──────┬──────┘
+       │ 2. Send message "Show me revenue for Q4"
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│  POST /api/v1/chat (SSE streaming)                          │
+│  ├─> SessionService.add_message(session_id, role, content)  │
+│  │   ├─> Load manifest from GCS                             │
+│  │   ├─> Generate message_id (UUID)                         │
+│  │   ├─> Append message to JSONL:                           │
+│  │   │   gs://.../messages-0001.jsonl                       │
+│  │   │   {"id": "msg_123", "role": "user",                  │
+│  │   │    "content": "Show me revenue for Q4",              │
+│  │   │    "timestamp": "2025-11-03T10:30:00Z"}              │
+│  │   ├─> Update manifest with message count                 │
+│  │   └─> Return message_id                                  │
+│  ├─> AISDKOrchestrator.send_message(session_id, content)    │
+│  │   ├─> Load prompt blocks from registry                   │
+│  │   │   (e.g., "system_prompt_dashboard_creation")         │
+│  │   ├─> Load last 20 messages from GCS JSONL               │
+│  │   ├─> Build prompt with cache-control headers:           │
+│  │   │   [{role: "system", content: "...",                  │
+│  │   │     cache_control: {type: "ephemeral"}},             │
+│  │   │    {role: "user", content: "Show me..."}]            │
+│  │   ├─> Call provider API (Claude/OpenAI/Google)           │
+│  │   ├─> Stream response as SSE events:                     │
+│  │   │   event: token, data: {"content": "I'll"}            │
+│  │   │   event: token, data: {"content": " create"}         │
+│  │   │   event: tool_call, data: {"tool": "bigquery_query"} │
+│  │   ├─> Log model call:                                    │
+│  │   │   model_calls(session_id, provider, model,           │
+│  │   │                input_tokens, output_tokens,          │
+│  │   │                cached_input_tokens, cost_usd,        │
+│  │   │                latency_ms)                            │
+│  │   ├─> Handle tool calls (if any)                         │
+│  │   ├─> Append assistant response to GCS JSONL             │
+│  │   ├─> Update manifest: total_tokens, total_cost_usd      │
+│  │   └─> Send final SSE event: complete                     │
+│  └─> Response: SSE stream until complete                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Flow: Execute Tool**
+
+```
+┌─────────────┐
+│   LLM       │
+│   Agent     │
+└──────┬──────┘
+       │ 3. Tool call requested: bigquery_query
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│  POST /api/v1/sessions/{session_id}/tools                   │
+│  ├─> AISDKOrchestrator.execute_tool(tool_name, args)        │
+│  │   ├─> Generate cache key:                                │
+│  │   │   tool:bigquery_query:{sha256(args)}                 │
+│  │   ├─> Check tool_cache table:                            │
+│  │   │   SELECT * FROM tool_cache                           │
+│  │   │   WHERE cache_key = '...'                            │
+│  │   │   AND expires_at > NOW()                             │
+│  │   ├─> Cache HIT:                                         │
+│  │   │   ├─> Read payload from GCS                          │
+│  │   │   ├─> Increment hit_count                            │
+│  │   │   ├─> Log cache hit in traces                        │
+│  │   │   └─> Return cached result                           │
+│  │   ├─> Cache MISS:                                        │
+│  │   │   ├─> Execute tool logic (e.g., run BigQuery query)  │
+│  │   │   ├─> Validate result against schema                 │
+│  │   │   ├─> Upload result to GCS                           │
+│  │   │   ├─> Insert into tool_cache table                   │
+│  │   │   └─> Return fresh result                            │
+│  │   ├─> Log tool execution in tool_calls table             │
+│  │   └─> Return {tool_call_id, result, cached}              │
+│  ├─> SessionService.add_tool_result(session_id, result)     │
+│  │   ├─> Append tool result message to GCS JSONL            │
+│  │   └─> Update manifest                                    │
+│  └─> Response: {tool_call_id, result, cached, latency_ms}   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Flow: Get Session History**
+
+```
+┌─────────────┐
+│   User      │
+│ (Chat UI)   │
+└──────┬──────┘
+       │ 4. Load previous conversation
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│  GET /api/v1/sessions/{session_id}                          │
+│  ├─> SessionService.get_session(session_id)                 │
+│  │   ├─> Load Postgres pointer:                             │
+│  │   │   SELECT * FROM sessions WHERE id = session_id       │
+│  │   ├─> Load manifest from GCS:                            │
+│  │   │   gs://bridge-sessions/{session_id}/manifest.json    │
+│  │   ├─> Read last 100 messages from JSONL chunks:          │
+│  │   │   gs://.../messages-0001.jsonl (parse, reverse)      │
+│  │   │   gs://.../messages-0002.jsonl (if exists)           │
+│  │   ├─> Query model_calls for session:                     │
+│  │   │   SELECT SUM(input_tokens), SUM(output_tokens),      │
+│  │   │          SUM(cost_usd)                                │
+│  │   │   FROM model_calls WHERE session_id = ...            │
+│  │   ├─> Enrich response with metrics:                      │
+│  │   │   {session, messages, total_tokens, total_cost}      │
+│  │   └─> Return enriched session                            │
+│  └─> Response: {session_id, messages, metrics, artifacts}   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Design Decisions**
+
+1. **Manifest is Append-Only**: Messages are added via JSONL append, never modified. Immutable audit trail.
+2. **Postgres Stores Pointers Only**: `sessions` table contains `session_id` + `gcs_path`, not full message content. Keeps DB lean.
+3. **GCS is Source of Truth**: All message content lives in GCS JSONL files. Postgres is metadata index only.
+4. **JSONL Chunking**: Messages rotate to new chunk after 10K tokens or 1000 messages. Prevents single file bloat.
+5. **Model Calls Always Logged**: Every LLM API call tracked in `model_calls` table with tokens and cost. Enables budget enforcement.
+6. **Tool Cache is Deterministic**: Same tool + same args → same cache key → instant cache hit. Reduces costs and latency.
+
+**Message Storage Format (JSONL)**
+
+```jsonl
+{"id": "msg_001", "role": "user", "content": "Show revenue for Q4", "timestamp": "2025-11-03T10:30:00Z"}
+{"id": "msg_002", "role": "assistant", "content": "I'll query BigQuery for Q4 revenue data.", "timestamp": "2025-11-03T10:30:05Z"}
+{"id": "msg_003", "role": "tool", "tool_call_id": "call_001", "tool_name": "bigquery_query", "result": {...}, "timestamp": "2025-11-03T10:30:10Z"}
+{"id": "msg_004", "role": "assistant", "content": "Here's your Q4 revenue dashboard...", "timestamp": "2025-11-03T10:30:15Z"}
+```
 
 ### **5. Caching & Freshness Model**
 
-**Cache Strategy**  
+### **5.1 BigQuery Result Cache**
+
+**Cache Strategy**
 Explicit precompute model for MVP. No automatic refresh. Cache keys follow pattern: dashboard slug, query hash derived from SQL and parameters, version number from last save. Multiple queries in single dashboard cached independently. Cache stores serialized JSON payloads ready for frontend consumption.
 
-**Freshness Semantics**  
+**Freshness Semantics**
 Each cached result tagged with BigQuery execution timestamp. Precompute operation bumps version for entire dashboard. Frontend receives as-of timestamp with each chart payload. Users see staleness explicitly in UI. No background refresh in MVP.
 
-**Cache Population**  
+**Cache Population**
 Manual trigger: operator calls precompute endpoint before users need data. On-demand: first uncached request executes and populates cache for subsequent users. Precompute preferred for consistent first-user experience.
 
-**TTL and Eviction**  
+**TTL and Eviction**
 Conservative TTL set as safety: 24-48 hours typical. Prevents unbounded growth. Version changes invalidate older cache entries implicitly. Manual purge endpoint available for troubleshooting.
 
-**Future Evolution Path**  
+**Future Evolution Path**
 Phase 1 introduces Pub/Sub event subscription. ETL pipeline completion triggers precompute automatically. Promotes cache from in-process to Redis/Memorystore for shared state across API instances. Phase 2 adds fine-grained invalidation based on query dependencies and upstream table changes.
+
+### **5.2 Tool Execution Cache (Deterministic Caching)**
+
+The tool cache eliminates redundant expensive operations (BigQuery queries, API calls, file operations) through deterministic key generation.
+
+**Cache Key Generation**
+
+```python
+import hashlib
+import json
+
+def generate_tool_cache_key(tool_name: str, args: dict) -> str:
+    # Canonicalize args: sort keys, remove null values, consistent formatting
+    canonical_args = json.dumps(args, sort_keys=True, ensure_ascii=True)
+    args_hash = hashlib.sha256(canonical_args.encode()).hexdigest()
+    return f"tool:{tool_name}:{args_hash}"
+
+# Example
+args = {"table": "mart.revenue_daily", "date_range": "last_90_days"}
+key = generate_tool_cache_key("bigquery_query", args)
+# Result: "tool:bigquery_query:a3f5e9..."
+```
+
+**Storage Pattern**
+
+- **Metadata in Postgres**: `tool_cache` table stores key, tool_name, TTL, expires_at, hit_count
+- **Payload in GCS**: `gs://bridge-cache/{tenant_id}/{tool_name}/{args_hash}.json`
+- **Why split storage?** Postgres enables fast TTL expiry queries; GCS handles large payloads efficiently
+
+**TTL Strategy by Tool Type**
+
+| Tool Type | TTL | Rationale |
+|-----------|-----|-----------|
+| Short-lived (e.g., current_time, random_value) | 1 minute | Values change frequently |
+| Stable (e.g., schema_query, metadata_lookup) | 24 hours | Schemas rarely change |
+| Expensive (e.g., large BigQuery scans, external APIs) | 7 days | High cost justifies longer cache |
+| User-specific (e.g., user_preferences) | 1 hour | Balance freshness and performance |
+
+**Cache Hit/Miss Flow**
+
+```python
+async def execute_tool_with_cache(tool_name: str, args: dict):
+    # Generate deterministic cache key
+    cache_key = generate_tool_cache_key(tool_name, args)
+
+    # Check cache (Postgres + GCS)
+    cache_entry = await db.query(ToolCache).filter_by(
+        cache_key=cache_key
+    ).filter(
+        ToolCache.expires_at > datetime.utcnow()
+    ).first()
+
+    if cache_entry:
+        # Cache HIT
+        payload = await gcs.download_json(cache_entry.gcs_payload_uri)
+        await db.execute(
+            update(ToolCache).where(ToolCache.id == cache_entry.id).values(
+                hit_count=ToolCache.hit_count + 1,
+                last_accessed=datetime.utcnow()
+            )
+        )
+        return {"result": payload, "cached": True}
+
+    # Cache MISS - execute tool
+    result = await execute_tool_logic(tool_name, args)
+
+    # Store in cache
+    gcs_uri = await gcs.upload_json(
+        f"gs://bridge-cache/{tool_name}/{args_hash}.json",
+        result
+    )
+
+    ttl = get_ttl_for_tool(tool_name)  # From config
+    await db.add(ToolCache(
+        tool_name=tool_name,
+        cache_key=cache_key,
+        gcs_payload_uri=gcs_uri,
+        ttl_seconds=ttl,
+        expires_at=datetime.utcnow() + timedelta(seconds=ttl)
+    ))
+
+    return {"result": result, "cached": False}
+```
+
+**Cache Invalidation**
+
+1. **Time-based**: Automatic expiry when `expires_at < NOW()`
+2. **Manual**: Admin endpoint `DELETE /v1/cache/tools/{tool_name}` clears all cache for a tool
+3. **Version-based**: Tool definition change (code update) increments version, invalidates old cache
+4. **Selective**: `DELETE /v1/cache/tools/{tool_name}/{args_hash}` clears specific cache entry
+
+**Benefits**
+
+- **Cost Reduction**: Avoid re-running expensive BigQuery queries (save $$$ on bytes scanned)
+- **Latency Reduction**: Cache hits return in <50ms vs seconds for BigQuery execution
+- **Determinism**: Same inputs always yield same cache key → predictable behavior
+- **Observability**: `hit_count` field tracks cache effectiveness per tool
+
+### **5.3 Prompt Block Caching (Anthropic Cache-Control)**
+
+Anthropic's prompt caching reduces costs by 90% on repeated context. We leverage this through a prompt block registry.
+
+**Cache-Control Types**
+
+- **Ephemeral**: 5-minute cache lifetime, suitable for conversation context
+- **Static**: Not supported in current Anthropic API, but blocks can be reused across sessions
+
+**Prompt Block Registry Pattern**
+
+```python
+# Stored in prompt_blocks table
+PROMPT_BLOCKS = {
+    "system_prompt_dashboard_creation": {
+        "block_type": "system",
+        "content": """You are Peter, an AI assistant specialized in creating data dashboards.
+Your goal is to help users transform natural language requests into YAML dashboard definitions.
+You have access to BigQuery datasets and can query schema information.
+Always validate SQL queries before including them in dashboards.""",
+        "cache_control": {"type": "ephemeral"},  # Cache for 5 minutes
+        "version": 1
+    },
+    "bigquery_schema_context": {
+        "block_type": "system",
+        "content": """Available BigQuery datasets and tables:
+- mart.revenue_daily (date, region, product_id, revenue, quantity)
+- mart.user_activity (date, user_id, event_type, session_id)
+- mart.product_catalog (product_id, product_name, category, price)
+...""",
+        "cache_control": {"type": "ephemeral"},  # Cache for 5 minutes
+        "version": 1
+    },
+    "context_budget_policy": {
+        "block_type": "system",
+        "content": """Context Budget Policy:
+- Maximum 8000 tokens per request
+- Summarize conversations after 50 messages
+- Drop old messages to stay within budget""",
+        "cache_control": {"type": "ephemeral"},
+        "version": 1
+    }
+}
+```
+
+**Usage in API Calls**
+
+```python
+async def send_message_with_caching(session_id: str, user_message: str):
+    # Load prompt blocks
+    system_prompt = await prompt_block_service.get_block("system_prompt_dashboard_creation")
+    schema_context = await prompt_block_service.get_block("bigquery_schema_context")
+
+    # Build messages with cache-control
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt.content,
+            "cache_control": {"type": "ephemeral"}  # Anthropic will cache this
+        },
+        {
+            "role": "system",
+            "content": schema_context.content,
+            "cache_control": {"type": "ephemeral"}  # And this
+        },
+        {
+            "role": "user",
+            "content": user_message
+        }
+    ]
+
+    # Call Claude API
+    response = await claude_client.messages.create(
+        model="claude-sonnet-4-5",
+        messages=messages
+    )
+
+    # Log cache usage
+    await model_calls_service.log(
+        session_id=session_id,
+        input_tokens=response.usage.input_tokens,
+        output_tokens=response.usage.output_tokens,
+        cached_input_tokens=response.usage.cache_read_input_tokens,  # From Anthropic response
+        cost_usd=calculate_cost(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cached_input_tokens=response.usage.cache_read_input_tokens
+        )
+    )
+```
+
+**Cost Savings Example**
+
+Without caching:
+- System prompt: 500 tokens × $0.003/1K = $0.0015 per call
+- Schema context: 1000 tokens × $0.003/1K = $0.003 per call
+- 100 calls/day: $0.45/day = $13.50/month
+
+With caching (90% cache hit rate):
+- First call: $0.0015 + $0.003 = $0.0045
+- Subsequent 9 calls (cached): (500 + 1000) × $0.0003/1K × 9 = $0.00405
+- 10 calls total: $0.00855 → $0.86/day = $25.80/month (vs $135 without caching)
+- **Savings: 81% reduction**
+
+**Cache Efficiency Metrics**
+
+```sql
+-- Calculate cache hit rate from model_calls table
+SELECT
+    COUNT(*) AS total_calls,
+    SUM(cached_input_tokens) AS total_cached_tokens,
+    SUM(input_tokens) AS total_input_tokens,
+    ROUND(100.0 * SUM(cached_input_tokens) / NULLIF(SUM(input_tokens), 0), 2) AS cache_hit_rate_pct,
+    SUM(cost_usd) AS total_cost_usd,
+    -- Estimated cost without caching (all tokens at full price)
+    SUM(input_tokens) * 0.003 / 1000 + SUM(output_tokens) * 0.015 / 1000 AS cost_without_cache_usd,
+    ROUND(100.0 * (1 - SUM(cost_usd) / NULLIF(SUM(input_tokens) * 0.003 / 1000 + SUM(output_tokens) * 0.015 / 1000, 0)), 2) AS savings_pct
+FROM model_calls
+WHERE created_at >= NOW() - INTERVAL '7 days';
+```
+
+**Best Practices**
+
+1. **Cache Long Static Content**: System prompts, schema definitions, documentation
+2. **Don't Cache User Input**: Only cache reusable blocks, not conversation-specific content
+3. **Version Prompt Blocks**: Increment version on content change to avoid stale cache
+4. **Monitor Cache Efficiency**: Track `cached_input_tokens` ratio in observability dashboards
+5. **Budget for Cache Misses**: First call to new session incurs full cost; budget accordingly
 
 ### **6. Security & Access**
 
@@ -126,8 +643,193 @@ Structured JSON logs via Python logging to stdout. Cloud Run captures and indexe
 **Lineage Tracking**  
 Lineage graph built during dashboard compilation. Nodes represent: dashboards, charts, queries, BigQuery tables, BigQuery views, BigQuery materialized views. Edges represent: dashboard contains chart, chart executes query, query reads from table. Stored as simple node and edge tables in Postgres. API endpoint exposes graph in JSON format for frontend consumption. Future: parse SQL to extract column-level lineage, integrate with dbt metadata.
 
-**Cost Monitoring**  
+**Cost Monitoring**
 Every BigQuery execution logs bytes scanned. API enforces maximum_bytes_billed parameter on all queries. Exceeding limit fails fast before expensive execution. Daily rollup job aggregates bytes scanned by dashboard, user, query to identify cost hotspots. Alerts trigger on cost thresholds.
+
+### **7.1 Model Call Logging & Cost Tracking**
+
+Every LLM API call is logged in the `model_calls` table for cost tracking, budget enforcement, and cache efficiency analysis.
+
+**Logged Metrics Per Call**
+
+```python
+# After every LLM API call
+await model_calls_service.log(
+    session_id=session_id,
+    provider="anthropic",  # anthropic | openai | google
+    model="claude-sonnet-4-5",
+    input_tokens=response.usage.input_tokens,
+    output_tokens=response.usage.output_tokens,
+    cached_input_tokens=response.usage.cache_read_input_tokens,  # Anthropic only
+    latency_ms=int((time.time() - start_time) * 1000),
+    cache_hit=response.usage.cache_read_input_tokens > 0,
+    cost_usd=calculate_cost(...),  # From pricing table
+    purpose="chat"  # chat | verification | summarization
+)
+```
+
+**Pricing Table (Example)**
+
+```python
+PRICING = {
+    "anthropic": {
+        "claude-sonnet-4-5": {
+            "input": 0.003 / 1000,  # $0.003 per 1K tokens
+            "output": 0.015 / 1000,  # $0.015 per 1K tokens
+            "cached_input": 0.0003 / 1000  # 90% discount on cached tokens
+        },
+        "claude-opus-4": {
+            "input": 0.015 / 1000,
+            "output": 0.075 / 1000,
+            "cached_input": 0.0015 / 1000
+        }
+    },
+    "openai": {
+        "gpt-4-turbo": {
+            "input": 0.01 / 1000,
+            "output": 0.03 / 1000
+        }
+    }
+}
+
+def calculate_cost(provider: str, model: str,
+                   input_tokens: int, output_tokens: int,
+                   cached_input_tokens: int = 0) -> float:
+    pricing = PRICING[provider][model]
+    cost = (
+        (input_tokens - cached_input_tokens) * pricing["input"] +
+        cached_input_tokens * pricing.get("cached_input", pricing["input"]) +
+        output_tokens * pricing["output"]
+    )
+    return round(cost, 6)
+```
+
+**Aggregation Queries**
+
+```sql
+-- Total cost per session
+SELECT
+    session_id,
+    COUNT(*) AS total_calls,
+    SUM(input_tokens) AS total_input_tokens,
+    SUM(output_tokens) AS total_output_tokens,
+    SUM(cached_input_tokens) AS total_cached_tokens,
+    SUM(cost_usd) AS total_cost_usd,
+    AVG(latency_ms) AS avg_latency_ms
+FROM model_calls
+GROUP BY session_id;
+
+-- Cost breakdown by model (last 7 days)
+SELECT
+    provider,
+    model,
+    COUNT(*) AS calls,
+    SUM(input_tokens + output_tokens) AS total_tokens,
+    SUM(cost_usd) AS total_cost_usd,
+    ROUND(AVG(latency_ms), 2) AS avg_latency_ms
+FROM model_calls
+WHERE executed_at >= NOW() - INTERVAL '7 days'
+GROUP BY provider, model
+ORDER BY total_cost_usd DESC;
+
+-- Cache efficiency
+SELECT
+    DATE(executed_at) AS date,
+    COUNT(*) AS total_calls,
+    SUM(cached_input_tokens) AS cached_tokens,
+    SUM(input_tokens) AS total_input_tokens,
+    ROUND(100.0 * SUM(cached_input_tokens) / NULLIF(SUM(input_tokens), 0), 2) AS cache_hit_rate_pct,
+    SUM(cost_usd) AS daily_cost_usd
+FROM model_calls
+WHERE executed_at >= NOW() - INTERVAL '30 days'
+GROUP BY DATE(executed_at)
+ORDER BY date DESC;
+
+-- Budget alerts (monthly spend by user)
+SELECT
+    s.user_id,
+    u.email,
+    COUNT(DISTINCT s.id) AS session_count,
+    SUM(mc.cost_usd) AS monthly_cost_usd,
+    CASE
+        WHEN SUM(mc.cost_usd) > 100 THEN 'CRITICAL'
+        WHEN SUM(mc.cost_usd) > 50 THEN 'WARNING'
+        ELSE 'OK'
+    END AS budget_status
+FROM model_calls mc
+JOIN sessions s ON mc.session_id = s.id
+JOIN users u ON s.user_id = u.id
+WHERE mc.executed_at >= DATE_TRUNC('month', NOW())
+GROUP BY s.user_id, u.email
+HAVING SUM(mc.cost_usd) > 10  -- Only show users with >$10 spend
+ORDER BY monthly_cost_usd DESC;
+```
+
+**Budget Enforcement**
+
+```python
+async def enforce_budget(session_id: str) -> bool:
+    # Check monthly budget
+    monthly_cost = await db.query(
+        func.sum(ModelCall.cost_usd)
+    ).join(
+        Session
+    ).filter(
+        Session.user_id == current_user.id,
+        ModelCall.executed_at >= func.date_trunc('month', func.now())
+    ).scalar()
+
+    if monthly_cost >= settings.monthly_llm_budget_usd:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Monthly LLM budget exceeded: ${monthly_cost:.2f} / ${settings.monthly_llm_budget_usd}"
+        )
+
+    return True
+```
+
+**OpenTelemetry Spans for Model Calls**
+
+```python
+with tracer.start_as_current_span("llm.model_call") as span:
+    span.set_attribute("session.id", session_id)
+    span.set_attribute("model.provider", provider)
+    span.set_attribute("model.name", model)
+    span.set_attribute("model.input_tokens", input_tokens)
+    span.set_attribute("model.output_tokens", output_tokens)
+    span.set_attribute("model.cached_input_tokens", cached_input_tokens)
+    span.set_attribute("model.cost_usd", cost_usd)
+    span.set_attribute("model.latency_ms", latency_ms)
+    span.set_attribute("model.cache_hit", cache_hit)
+    span.set_attribute("model.purpose", purpose)
+```
+
+**Metrics Dashboard (Grafana/Cloud Monitoring)**
+
+Key metrics to track:
+- Total cost over time (daily/weekly/monthly trends)
+- Cost by provider and model
+- Token usage by purpose (chat vs verification vs summarization)
+- Cache hit rate (cached_input_tokens / total_input_tokens)
+- Average latency by model
+- Error rate by provider
+- Budget utilization (current spend vs monthly limit)
+
+**Cost Alert Thresholds**
+
+```python
+# settings.py
+COST_ALERT_THRESHOLDS = {
+    "daily": {
+        "warning": 50,   # $50/day
+        "critical": 100  # $100/day
+    },
+    "monthly": {
+        "warning": 800,  # 80% of $1000 budget
+        "critical": 950  # 95% of budget
+    }
+}
+```
 
 ### **8. User Journeys**
 
@@ -237,6 +939,7 @@ Fine-grained cache invalidation based on query dependency analysis. BI Engine en
 | API Endpoints (Phase 3) | ⚠️ Shipping w/ placeholder data | docs/task.md (Phase 3.1-3.7) | All 14 routes live; `GET /v1/data/{slug}` and `POST /v1/precompute` still return marked placeholder payloads (apps/api/src/services/data_serving.py, precompute.py) pending query execution wiring. |
 | Schema Browser API | ✅ Complete | docs/task.md (Phase 4.1, Phase 8.1) | `/v1/schema/*` endpoints implemented with Redis caching (datasets 1h, tables 15m) and FREE BigQuery APIs; supports Dataset Explorer UX. |
 | Guardrails Backlog | 🚧 In Progress | docs/task.md §2.10 | Dataset allowlist, SQL sanitiser, cache TTL/purge endpoint scheduled; required to close PDR §9 risk mitigations. |
+| Universal AI SDK Integration (Phase 2.12) | ⏳ Planned | docs/task.md (Phase 2.12) | GCS-backed session storage, model call logging, tool caching, prompt block registry—enables LLM-driven dashboard creation with cost tracking and deterministic caching. |
 
 **Outstanding follow-ups**
 - Replace placeholder responses in DataServing/Precompute with real execution + cache writes before declaring PDR §5 complete.
@@ -247,6 +950,11 @@ Fine-grained cache invalidation based on query dependency analysis. BI Engine en
 - **YAML SSOT migration (2025-10-31)** — Dashboard definitions now stored exclusively in `/dashboards/*.yaml`; Postgres `dashboards` table deprecated. Rationale: eliminate drift, simplify deploy surface, improve developer ergonomics (git reviewable configs). Value: reduces 200–300 LoC, removes periodic sync job.
 - **Schema Browser cost posture** — Adopted BigQuery `datasets.list` + `tabledata.list` APIs only (no billed query jobs). Ensures zero-cost browsing while meeting PDR §9 cost guardrails.
 - **Async compliance sweep** — Converted blocking service methods to async/await (see docs/task.md Phase 2 deliverables). Keeps event loop free for chat + precompute workloads.
+- **ADR-001: Postgres as Directory, GCS as Data Lake (2025-11-03)** — Session messages stored in GCS JSONL files, not Postgres. Rationale: Postgres optimized for metadata queries, not large blobs; GCS cheaper and scales to 1000+ message conversations. Postgres stores only pointers (`session_id`, `gcs_path`). Value: DB stays <1 GB even with 10K active sessions; query performance remains sub-100ms.
+- **ADR-002: Universal AI SDK Layer (2025-11-03)** — Abstract orchestrator interface wraps provider-specific SDKs (Claude, OpenAI, Google). Rationale: Single codebase for multi-provider support; easy to switch providers or A/B test models. Trade-off: Initial complexity for long-term flexibility. Value: Reduces vendor lock-in, enables cost optimization via provider arbitrage.
+- **ADR-003: Deterministic Tool Caching (2025-11-03)** — Tool results cached with SHA-256 hash of canonicalized args as key. Rationale: Same inputs → same cache key → instant cache hit; reduces BigQuery costs and latency. Implementation: Split storage (Postgres metadata + GCS payload) for fast TTL queries + large result handling. Value: 80%+ cache hit rate on stable tools saves ~$500/month on BigQuery.
+- **ADR-004: Model Call Logging for Cost Tracking (2025-11-03)** — Every LLM API call logged in `model_calls` table with token counts and cost. Rationale: Budget enforcement, cost attribution, cache efficiency analysis. Overhead: +50ms per call for DB INSERT, negligible vs LLM latency. Value: Enables per-user cost caps, prevents runaway spend, tracks cache ROI.
+- **ADR-005: Anthropic Prompt Caching Integration (2025-11-03)** — Use Anthropic cache-control headers for static prompt blocks. Rationale: 90% cost reduction on cached tokens (~5-minute cache lifetime). Implementation: Prompt block registry in DB, cache-control injected automatically. Constraint: Only works with Anthropic; other providers need fallback. Value: Reduces monthly LLM spend by 60-80% in typical usage patterns.
 
 ### **12.3 Schema Browser Implementation Snapshot**
 - Endpoints: `/v1/schema/datasets`, `/v1/schema/datasets/{id}/tables`, `/v1/schema/tables/{id}/schema|metadata|preview`, `/v1/schema/cache/invalidate`.
