@@ -7,7 +7,7 @@ PDR Reference: §3 (Architecture Overview - API Service)
 
 from fastapi import APIRouter
 
-from src.api.v1 import auth, dashboards, data, health, lineage, precompute, schema, sql
+from src.api.v1 import auth, dashboards, data, health, lineage, onboarding, precompute, schema, sql
 
 # Create v1 router
 router = APIRouter(prefix="/v1")
@@ -15,6 +15,7 @@ router = APIRouter(prefix="/v1")
 # Include all endpoint routers
 router.include_router(health.router)
 router.include_router(auth.router)
+router.include_router(onboarding.router)
 router.include_router(dashboards.router)
 router.include_router(sql.router)
 router.include_router(data.router)

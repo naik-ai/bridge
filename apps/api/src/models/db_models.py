@@ -44,6 +44,28 @@ class QueryPurpose(str, PyEnum):
     precompute = "precompute"
 
 
+class ConnectionType(str, PyEnum):
+    """Database connection type."""
+    bigquery = "bigquery"
+    postgres = "postgres"
+    snowflake = "snowflake"
+
+
+class ConnectionStatus(str, PyEnum):
+    """Connection health status."""
+    active = "active"
+    failed = "failed"
+    testing = "testing"
+
+
+class CatalogJobStatus(str, PyEnum):
+    """Catalog discovery job status."""
+    pending = "pending"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
 # Database Models
 class User(SQLModel, table=True):
     """User model for authentication."""
@@ -234,3 +256,126 @@ class QueryLog(SQLModel, table=True):
         bytes_per_tb = 1024 ** 4
         cost_per_tb = 5.0
         return (self.bytes_scanned / bytes_per_tb) * cost_per_tb
+
+
+# Phase 0: Onboarding Models
+class Team(SQLModel, table=True):
+    """Team model for multi-tenancy."""
+
+    __tablename__ = "teams"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    name: str = Field(max_length=255, nullable=False)
+    slug: str = Field(max_length=255, unique=True, index=True, nullable=False)
+
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
+
+    # Relationships
+    connections: List["Connection"] = Relationship(back_populates="team", cascade_delete=True)
+
+    __table_args__ = (
+        Index("idx_team_slug", "slug"),
+    )
+
+
+class Connection(SQLModel, table=True):
+    """Database connection model."""
+
+    __tablename__ = "connections"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    team_id: UUID = Field(foreign_key="teams.id", nullable=False, ondelete="CASCADE")
+
+    # Connection info
+    name: str = Field(max_length=255, nullable=False)
+    connection_type: ConnectionType = Field(nullable=False)
+
+    # Credentials stored in GCS with KMS encryption
+    # This field stores the GCS path to encrypted credentials
+    credentials_path: str = Field(max_length=512, nullable=False)
+
+    # Connection status
+    status: ConnectionStatus = Field(default=ConnectionStatus.testing, nullable=False)
+    last_tested_at: Optional[datetime] = Field(default=None)
+
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
+
+    # Relationships
+    team: Optional[Team] = Relationship(back_populates="connections")
+    datasets: List["Dataset"] = Relationship(back_populates="connection", cascade_delete=True)
+
+    __table_args__ = (
+        Index("idx_connection_team", "team_id"),
+        Index("idx_connection_status", "status"),
+    )
+
+
+class Dataset(SQLModel, table=True):
+    """Dataset/schema model discovered from connections."""
+
+    __tablename__ = "datasets"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    connection_id: UUID = Field(foreign_key="connections.id", nullable=False, ondelete="CASCADE")
+
+    # Dataset info
+    name: str = Field(max_length=255, nullable=False)
+    fully_qualified_name: str = Field(max_length=512, nullable=False)
+    description: Optional[str] = Field(default=None, sa_column=Column(Text))
+
+    # Catalog job tracking
+    catalog_job_id: Optional[str] = Field(default=None, max_length=255)
+    catalog_job_status: CatalogJobStatus = Field(default=CatalogJobStatus.pending, nullable=False)
+
+    # Timestamps
+    discovered_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
+    last_scanned_at: Optional[datetime] = Field(default=None)
+
+    # Relationships
+    connection: Optional[Connection] = Relationship(back_populates="datasets")
+    tables: List["Table"] = Relationship(back_populates="dataset", cascade_delete=True)
+
+    __table_args__ = (
+        UniqueConstraint("connection_id", "fully_qualified_name", name="uq_dataset_fqn"),
+        Index("idx_dataset_connection", "connection_id"),
+        Index("idx_dataset_fqn", "fully_qualified_name"),
+    )
+
+
+class Table(SQLModel, table=True):
+    """Table model discovered from datasets."""
+
+    __tablename__ = "tables"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    dataset_id: UUID = Field(foreign_key="datasets.id", nullable=False, ondelete="CASCADE")
+
+    # Table info
+    name: str = Field(max_length=255, nullable=False)
+    fully_qualified_name: str = Field(max_length=512, nullable=False)
+    description: Optional[str] = Field(default=None, sa_column=Column(Text))
+
+    # Schema stored as JSONB
+    # Format: [{"name": "col1", "type": "STRING", "description": "..."}, ...]
+    schema: Optional[List[dict]] = Field(default=None, sa_column=Column(JSONB))
+
+    # Table metadata
+    row_count: Optional[int] = Field(default=None)
+    size_bytes: Optional[int] = Field(default=None)
+
+    # Timestamps
+    discovered_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
+    last_scanned_at: Optional[datetime] = Field(default=None)
+
+    # Relationships
+    dataset: Optional[Dataset] = Relationship(back_populates="tables")
+
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "fully_qualified_name", name="uq_table_fqn"),
+        Index("idx_table_dataset", "dataset_id"),
+        Index("idx_table_fqn", "fully_qualified_name"),
+    )

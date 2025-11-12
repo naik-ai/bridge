@@ -104,6 +104,17 @@ class Settings(BaseSettings):
     gcs_dashboards_prefix: str = Field(
         default="dashboards/", description="Prefix for dashboard files"
     )
+    gcs_credentials_bucket: str | None = Field(
+        default=None, description="GCS bucket for encrypted credentials"
+    )
+    gcs_credentials_prefix: str = Field(
+        default="credentials/", description="Prefix for credential files"
+    )
+
+    # Cloud KMS (for encrypting credentials)
+    kms_key_ring: str | None = Field(default=None, description="Cloud KMS key ring name")
+    kms_crypto_key: str | None = Field(default=None, description="Cloud KMS crypto key name")
+    kms_location: str = Field(default="global", description="Cloud KMS location")
 
     # Secret Manager
     use_secret_manager: bool = Field(
