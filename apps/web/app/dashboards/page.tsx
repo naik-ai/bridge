@@ -20,7 +20,7 @@ import { cn } from '@/lib/utils';
 
 export default function DashboardsPage() {
   const { data, isLoading, error } = useQuery({
-    queryKey: queryKeys.dashboards.all,
+    queryKey: queryKeys.dashboards,
     queryFn: () => DashboardsService.listDashboards(),
   });
 
